@@ -1,0 +1,56 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build outputs
+dist/
+*/dist/
+build/
+
+# Environment
+.env
+.env.local
+.env.*.local
+*/.env
+*/.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Arduino
+*.ino.hex
+*.ino.elf
+*.ino.bin
+*.ino.map
+arduino_output/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Vercel
+.vercel/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+
+# Arduino IDE cache
+build/
