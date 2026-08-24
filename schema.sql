@@ -1,10 +1,24 @@
 -- Smart Bin Municipal Monitoring + Citizen Reward System
--- Supabase Schema
+-- Supabase Schema with Authentication
 -- Deploy this SQL in your Supabase SQL Editor
 
 -- ============================================================================
 -- TABLES
 -- ============================================================================
+
+-- User profiles (extends Supabase auth.users)
+CREATE TABLE IF NOT EXISTS profiles (
+  id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  email TEXT UNIQUE NOT NULL,
+  full_name TEXT NOT NULL,
+  account_type TEXT NOT NULL CHECK (account_type IN ('civilian', 'admin')),
+  card_uid TEXT UNIQUE, -- RFID card linked to this account (civilians only)
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_profiles_card_uid ON profiles(card_uid);
+CREATE INDEX idx_profiles_account_type ON profiles(account_type);
 
 -- Devices table (bins)
 CREATE TABLE IF NOT EXISTS devices (
@@ -39,13 +53,16 @@ CREATE TABLE IF NOT EXISTS empty_events (
 
 CREATE INDEX idx_empty_events_device_time ON empty_events(device_id, timestamp DESC);
 
--- Citizens table (RFID cardholders)
+-- Citizens table (RFID cardholders with points)
 CREATE TABLE IF NOT EXISTS citizens (
   card_uid TEXT PRIMARY KEY,
+  user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL, -- Link to registered user
   name TEXT,
   points_balance INT NOT NULL DEFAULT 0 CHECK (points_balance >= 0),
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE INDEX idx_citizens_user_id ON citizens(user_id);
 
 -- Reward events (disposal logging)
 CREATE TABLE IF NOT EXISTS reward_events (
@@ -78,21 +95,33 @@ CREATE INDEX idx_redemptions_card ON redemptions(card_uid, redeemed_at DESC);
 CREATE INDEX idx_redemptions_code ON redemptions(redemption_code);
 
 -- ============================================================================
--- TRIGGER: Auto-award points on confirmed reward events
+-- TRIGGERS
 -- ============================================================================
 
+-- Auto-update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER update_profiles_updated_at
+BEFORE UPDATE ON profiles
+FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+-- Auto-award points on confirmed reward events
 CREATE OR REPLACE FUNCTION award_points_on_reward()
 RETURNS TRIGGER AS $$
 BEGIN
-  -- Only process confirmed disposals with points > 0
   IF NEW.confidence = 'confirmed' AND NEW.points_awarded > 0 THEN
-    -- Insert or update citizen record
     INSERT INTO citizens (card_uid, points_balance)
     VALUES (NEW.card_uid, NEW.points_awarded)
     ON CONFLICT (card_uid)
     DO UPDATE SET points_balance = citizens.points_balance + NEW.points_awarded;
   END IF;
-
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -102,10 +131,68 @@ AFTER INSERT ON reward_events
 FOR EACH ROW
 EXECUTE FUNCTION award_points_on_reward();
 
+-- Create profile on user signup
+CREATE OR REPLACE FUNCTION create_profile_for_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO profiles (id, email, full_name, account_type)
+  VALUES (
+    NEW.id,
+    NEW.email,
+    COALESCE(NEW.raw_user_meta_data->>'full_name', 'User'),
+    COALESCE(NEW.raw_user_meta_data->>'account_type', 'civilian')
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE TRIGGER on_auth_user_created
+AFTER INSERT ON auth.users
+FOR EACH ROW
+EXECUTE FUNCTION create_profile_for_user();
+
 -- ============================================================================
--- FUNCTION: Redeem points (with validation)
+-- FUNCTIONS
 -- ============================================================================
 
+-- Link RFID card to user account during registration
+CREATE OR REPLACE FUNCTION link_rfid_to_user(
+  p_user_id UUID,
+  p_card_uid TEXT
+)
+RETURNS TABLE (
+  success BOOLEAN,
+  error_message TEXT
+) AS $$
+DECLARE
+  v_card_exists BOOLEAN;
+  v_card_linked BOOLEAN;
+BEGIN
+  -- Check if card is already linked to another user
+  SELECT EXISTS (
+    SELECT 1 FROM profiles WHERE card_uid = p_card_uid AND id != p_user_id
+  ) INTO v_card_linked;
+
+  IF v_card_linked THEN
+    RETURN QUERY SELECT FALSE, 'This RFID card is already linked to another account';
+    RETURN;
+  END IF;
+
+  -- Update profile with card_uid
+  UPDATE profiles
+  SET card_uid = p_card_uid
+  WHERE id = p_user_id;
+
+  -- Link existing citizen record to user if it exists
+  UPDATE citizens
+  SET user_id = p_user_id
+  WHERE card_uid = p_card_uid;
+
+  RETURN QUERY SELECT TRUE, NULL::TEXT;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Redeem points (with validation)
 CREATE OR REPLACE FUNCTION redeem_points(
   p_card_uid TEXT,
   p_points_spent INT
@@ -120,7 +207,6 @@ DECLARE
   v_current_balance INT;
   v_redemption_code TEXT;
 BEGIN
-  -- Check citizen exists and has enough points
   SELECT points_balance INTO v_current_balance
   FROM citizens
   WHERE card_uid = p_card_uid
@@ -136,28 +222,24 @@ BEGIN
     RETURN;
   END IF;
 
-  -- Generate 8-char alphanumeric code
   v_redemption_code := UPPER(SUBSTRING(MD5(RANDOM()::TEXT || CLOCK_TIMESTAMP()::TEXT) FROM 1 FOR 8));
 
-  -- Deduct points
   UPDATE citizens
   SET points_balance = points_balance - p_points_spent
   WHERE card_uid = p_card_uid;
 
-  -- Log redemption
   INSERT INTO redemptions (card_uid, points_spent, redemption_code)
   VALUES (p_card_uid, p_points_spent, v_redemption_code);
 
-  -- Return success
   RETURN QUERY SELECT TRUE, v_redemption_code, v_current_balance - p_points_spent, NULL::TEXT;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 -- ============================================================================
 -- ROW LEVEL SECURITY (RLS)
 -- ============================================================================
 
--- Enable RLS on all tables
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
 ALTER TABLE devices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bin_readings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE empty_events ENABLE ROW LEVEL SECURITY;
@@ -165,48 +247,77 @@ ALTER TABLE citizens ENABLE ROW LEVEL SECURITY;
 ALTER TABLE reward_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE redemptions ENABLE ROW LEVEL SECURITY;
 
--- IMPORTANT: For exhibition/demo purposes, allow anon key access
--- A production municipal deployment should use:
--- - Service role key or authenticated endpoints for firmware
--- - Proper citizen authentication (not just card UID lookup)
--- - Admin-only access for sensitive operations
+-- Profiles: users can read their own profile, admins can read all
+CREATE POLICY profiles_select_own ON profiles
+FOR SELECT
+TO authenticated
+USING (auth.uid() = id OR EXISTS (
+  SELECT 1 FROM profiles WHERE id = auth.uid() AND account_type = 'admin'
+));
 
--- Devices: allow upsert (insert + update) from anon
-CREATE POLICY devices_anon_upsert ON devices
-FOR ALL
+CREATE POLICY profiles_update_own ON profiles
+FOR UPDATE
+TO authenticated
+USING (auth.uid() = id)
+WITH CHECK (auth.uid() = id);
+
+-- Devices: allow firmware inserts (anon), admins can read/update
+CREATE POLICY devices_anon_insert ON devices
+FOR INSERT
 TO anon
-USING (true)
 WITH CHECK (true);
 
--- Bin readings: allow insert from anon (firmware)
+CREATE POLICY devices_admin_select ON devices
+FOR SELECT
+TO authenticated
+USING (EXISTS (
+  SELECT 1 FROM profiles WHERE id = auth.uid() AND account_type = 'admin'
+));
+
+CREATE POLICY devices_admin_update ON devices
+FOR UPDATE
+TO authenticated
+USING (EXISTS (
+  SELECT 1 FROM profiles WHERE id = auth.uid() AND account_type = 'admin'
+))
+WITH CHECK (EXISTS (
+  SELECT 1 FROM profiles WHERE id = auth.uid() AND account_type = 'admin'
+));
+
+-- Bin readings: firmware can insert (anon), admins can read
 CREATE POLICY bin_readings_anon_insert ON bin_readings
 FOR INSERT
 TO anon
 WITH CHECK (true);
 
--- Bin readings: allow select for PWA
-CREATE POLICY bin_readings_anon_select ON bin_readings
+CREATE POLICY bin_readings_admin_select ON bin_readings
 FOR SELECT
-TO anon
-USING (true);
+TO authenticated
+USING (EXISTS (
+  SELECT 1 FROM profiles WHERE id = auth.uid() AND account_type = 'admin'
+));
 
--- Empty events: allow insert from anon (firmware)
+-- Empty events: firmware can insert (anon), admins can read
 CREATE POLICY empty_events_anon_insert ON empty_events
 FOR INSERT
 TO anon
 WITH CHECK (true);
 
--- Empty events: allow select for PWA
-CREATE POLICY empty_events_anon_select ON empty_events
+CREATE POLICY empty_events_admin_select ON empty_events
 FOR SELECT
-TO anon
-USING (true);
+TO authenticated
+USING (EXISTS (
+  SELECT 1 FROM profiles WHERE id = auth.uid() AND account_type = 'admin'
+));
 
--- Citizens: allow select and insert/update (for point awards)
-CREATE POLICY citizens_anon_select ON citizens
+-- Citizens: users can read their own linked card, admins can read all
+CREATE POLICY citizens_select_own ON citizens
 FOR SELECT
-TO anon
-USING (true);
+TO authenticated
+USING (
+  user_id = auth.uid() OR
+  EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND account_type = 'admin')
+);
 
 CREATE POLICY citizens_anon_upsert ON citizens
 FOR ALL
@@ -214,23 +325,28 @@ TO anon
 USING (true)
 WITH CHECK (true);
 
--- Reward events: allow insert from anon (firmware)
+-- Reward events: firmware can insert (anon), users can read their own, admins can read all
 CREATE POLICY reward_events_anon_insert ON reward_events
 FOR INSERT
 TO anon
 WITH CHECK (true);
 
--- Reward events: allow select for PWA
-CREATE POLICY reward_events_anon_select ON reward_events
+CREATE POLICY reward_events_select_own ON reward_events
 FOR SELECT
-TO anon
-USING (true);
+TO authenticated
+USING (
+  card_uid IN (SELECT card_uid FROM profiles WHERE id = auth.uid()) OR
+  EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND account_type = 'admin')
+);
 
--- Redemptions: allow select and insert (via redeem_points function)
-CREATE POLICY redemptions_anon_select ON redemptions
+-- Redemptions: users can read their own, admins can read all
+CREATE POLICY redemptions_select_own ON redemptions
 FOR SELECT
-TO anon
-USING (true);
+TO authenticated
+USING (
+  card_uid IN (SELECT card_uid FROM profiles WHERE id = auth.uid()) OR
+  EXISTS (SELECT 1 FROM profiles WHERE id = auth.uid() AND account_type = 'admin')
+);
 
 CREATE POLICY redemptions_anon_insert ON redemptions
 FOR INSERT
@@ -241,44 +357,10 @@ WITH CHECK (true);
 -- ENABLE REALTIME
 -- ============================================================================
 
--- Enable Realtime on all tables for live PWA updates
+ALTER PUBLICATION supabase_realtime ADD TABLE profiles;
 ALTER PUBLICATION supabase_realtime ADD TABLE devices;
 ALTER PUBLICATION supabase_realtime ADD TABLE bin_readings;
 ALTER PUBLICATION supabase_realtime ADD TABLE empty_events;
 ALTER PUBLICATION supabase_realtime ADD TABLE citizens;
 ALTER PUBLICATION supabase_realtime ADD TABLE reward_events;
 ALTER PUBLICATION supabase_realtime ADD TABLE redemptions;
-
--- ============================================================================
--- SAMPLE DATA (optional - for testing)
--- ============================================================================
-
--- Insert a test device
--- INSERT INTO devices (device_id, location) VALUES ('BIN_ESP32_001', 'Main Street North');
-
--- Insert a test citizen
--- INSERT INTO citizens (card_uid, name, points_balance) VALUES ('ABCD1234', 'Test User', 0);
-
--- ============================================================================
--- NOTES
--- ============================================================================
-
--- Security considerations for production:
--- 1. Replace anon key access with service role key for firmware POST operations
--- 2. Implement proper authentication for citizen lookup (OAuth, JWT, etc.)
--- 3. Restrict redemptions to authenticated admin users only
--- 4. Add audit logging for all point deductions
--- 5. Implement fraud detection (e.g., multiple disposals from same user in short time)
--- 6. Add geofencing to prevent reward events from unauthorized device_ids
--- 7. Encrypt sensitive PII (citizen names, contact info if added later)
-
--- Performance optimization for large deployments:
--- 1. Partition bin_readings and reward_events by month for time-series queries
--- 2. Add materialized views for dashboard aggregations (e.g., daily bin fill stats)
--- 3. Archive old data to cold storage after 90 days
--- 4. Add database connection pooling (Supabase handles this automatically)
-
--- Realtime considerations:
--- 1. Realtime is enabled on all tables - monitor connection count as fleet scales
--- 2. For >1000 concurrent PWA clients, consider switching to polling for non-critical updates
--- 3. Use Supabase Realtime filters to subscribe only to relevant device_ids per client

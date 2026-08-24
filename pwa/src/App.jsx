@@ -1,108 +1,108 @@
 import { useState, useEffect } from 'react';
 import { supabase } from './lib/supabase';
-import FleetView from './components/FleetView';
-import BinDetail from './components/BinDetail';
-import CitizenLookup from './components/CitizenLookup';
-import RedeemFlow from './components/RedeemFlow';
-import AdminAudit from './components/AdminAudit';
+import Login from './components/Login';
+import Register from './components/Register';
+import CivilianDashboard from './components/CivilianDashboard';
+import AdminDashboard from './components/AdminDashboard';
+import InstallButton from './components/InstallButton';
 import './App.css';
 
 function App() {
-  const [view, setView] = useState('fleet'); // fleet, detail, citizen, redeem, admin
-  const [selectedBin, setSelectedBin] = useState(null);
+  const [user, setUser] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState('login'); // login, register
 
   useEffect(() => {
-    // Request notification permission
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
+    // Check active session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchProfile(session.user.id);
+      } else {
+        setLoading(false);
+      }
+    });
 
-    // Subscribe to high-fill alerts
-    const channel = supabase
-      .channel('bin-alerts')
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'bin_readings',
-          filter: 'fill_pct=gt.80'
-        },
-        (payload) => {
-          if ('Notification' in window && Notification.permission === 'granted') {
-            new Notification('Bin Needs Pickup', {
-              body: `${payload.new.device_id} is at ${payload.new.fill_pct}% capacity`,
-              icon: '/bin-icon.png'
-            });
-          }
-        }
-      )
-      .subscribe();
+    // Listen for auth changes
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        fetchProfile(session.user.id);
+      } else {
+        setProfile(null);
+        setLoading(false);
+      }
+    });
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    return () => subscription.unsubscribe();
   }, []);
 
-  const renderView = () => {
-    switch (view) {
-      case 'detail':
-        return <BinDetail deviceId={selectedBin} onBack={() => setView('fleet')} />;
-      case 'citizen':
-        return <CitizenLookup onBack={() => setView('fleet')} />;
-      case 'redeem':
-        return <RedeemFlow onBack={() => setView('fleet')} />;
-      case 'admin':
-        return <AdminAudit onBack={() => setView('fleet')} />;
-      default:
-        return (
-          <FleetView
-            onSelectBin={(deviceId) => {
-              setSelectedBin(deviceId);
-              setView('detail');
-            }}
-          />
-        );
+  const fetchProfile = async (userId) => {
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single();
+
+      if (error) throw error;
+      setProfile(data);
+    } catch (error) {
+      console.error('Error fetching profile:', error);
+    } finally {
+      setLoading(false);
     }
   };
 
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
+    setProfile(null);
+    setView('login');
+  };
+
+  if (loading) {
+    return (
+      <div className="loading-screen">
+        <div className="spinner"></div>
+        <p>Loading...</p>
+      </div>
+    );
+  }
+
+  // Not logged in - show login/register
+  if (!user || !profile) {
+    return (
+      <div className="auth-container">
+        <InstallButton />
+        <div className="auth-card">
+          <div className="auth-header">
+            <h1>🗑️ Smart Bin System</h1>
+            <p>Municipal Waste Management & Rewards</p>
+          </div>
+
+          {view === 'login' ? (
+            <Login onSuccess={() => fetchProfile(user?.id)} onSwitchToRegister={() => setView('register')} />
+          ) : (
+            <Register onSuccess={() => setView('login')} onSwitchToLogin={() => setView('login')} />
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Logged in - show appropriate dashboard
   return (
     <div className="app">
-      <header className="header">
-        <h1>🗑️ Smart Bin Fleet</h1>
-        <nav className="nav">
-          <button
-            className={view === 'fleet' ? 'active' : ''}
-            onClick={() => setView('fleet')}
-          >
-            Fleet
-          </button>
-          <button
-            className={view === 'citizen' ? 'active' : ''}
-            onClick={() => setView('citizen')}
-          >
-            Citizen Lookup
-          </button>
-          <button
-            className={view === 'redeem' ? 'active' : ''}
-            onClick={() => setView('redeem')}
-          >
-            Redeem Points
-          </button>
-          <button
-            className={view === 'admin' ? 'active' : ''}
-            onClick={() => setView('admin')}
-          >
-            Admin Audit
-          </button>
-        </nav>
-      </header>
-
-      <main className="main">{renderView()}</main>
-
-      <footer className="footer">
-        <p>Municipal Smart Bin System • {new Date().getFullYear()}</p>
-      </footer>
+      <InstallButton />
+      {profile.account_type === 'admin' ? (
+        <AdminDashboard profile={profile} onLogout={handleLogout} />
+      ) : (
+        <CivilianDashboard profile={profile} onLogout={handleLogout} />
+      )}
     </div>
   );
 }
