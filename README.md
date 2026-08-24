@@ -1,6 +1,6 @@
 # Smart Bin Municipal Monitoring + Citizen Reward System
 
-A complete IoT solution for municipal smart bin management with RFID-based citizen rewards.
+A complete IoT solution for municipal smart bin management with RFID-based citizen rewards and account authentication.
 
 ## ⚠️ Important Notes
 
@@ -11,28 +11,66 @@ A complete IoT solution for municipal smart bin management with RFID-based citiz
 - **Minimum fill rise**: 2% (configurable threshold)
 - **Redemption flow**: v1 generates an 8-char code for manual shop validation (no real payment integration)
 
+## 🆕 Authentication System
+
+### Account Types
+
+**1. Civilian Account**
+- For citizens who earn points by disposing waste
+- Links to RFID card during registration
+- Views: Points balance, reward history, redemptions
+- Can only see their own data
+
+**2. Admin Account**
+- For municipal staff managing bins
+- Full access to all bins and data
+- Views: Fleet overview, bin details, reward audit
+- Can edit bin locations
+- No RFID card required
+
+### Registration Flow
+1. Choose account type (Civilian or Admin)
+2. Enter email, password, full name
+3. **Civilian only**: Enter RFID card UID (links card to account)
+4. Email verification (Supabase built-in)
+5. Login with credentials
+
+### Login Flow
+1. Enter email + password
+2. Authenticated via Supabase Auth
+3. Auto-redirected to appropriate dashboard based on account type
+
+### Install Button
+- Appears in top-right corner when PWA is installable
+- Click to install as a home screen app
+- **Disappears after install** (detects standalone mode)
+- Works on Chrome, Edge, Safari iOS/Android
+
 ## Project Structure
 
 ```
 smart-bin-reward-system/
 ├── smart_bin_esp32.ino       # Arduino IDE firmware (ESP32 only)
-├── schema.sql                 # Supabase schema with RLS + triggers
+├── schema.sql                 # Supabase schema with auth + RLS + triggers
 └── pwa/                       # React + Vite PWA
     ├── src/
     │   ├── components/
-    │   │   ├── FleetView.jsx      # All bins dashboard
-    │   │   ├── BinDetail.jsx      # Bin chart + history
-    │   │   ├── CitizenLookup.jsx  # RFID card balance/history
-    │   │   ├── RedeemFlow.jsx     # Generate redemption codes
-    │   │   └── AdminAudit.jsx     # Fraud detection view
+    │   │   ├── Login.jsx              # Login form
+    │   │   ├── Register.jsx           # Registration with RFID linking
+    │   │   ├── CivilianDashboard.jsx  # Civilian view (points, history)
+    │   │   ├── AdminDashboard.jsx     # Admin view (fleet, audit)
+    │   │   ├── FleetView.jsx          # All bins dashboard
+    │   │   ├── BinDetail.jsx          # Bin chart + history
+    │   │   ├── AdminAudit.jsx         # Reward audit
+    │   │   └── InstallButton.jsx      # PWA install button
     │   ├── lib/
-    │   │   └── supabase.js        # Supabase client
-    │   ├── App.jsx                # Main app with navigation
-    │   └── App.css                # Dark mode styling
+    │   │   └── supabase.js            # Supabase client
+    │   ├── App.jsx                    # Main app with auth routing
+    │   └── App.css                    # Dark mode styling
     ├── public/
-    │   ├── manifest.json          # PWA manifest
-    │   └── sw.js                  # Service worker
-    └── vercel.json                # Vercel deployment config
+    │   ├── manifest.json              # PWA manifest
+    │   └── sw.js                      # Service worker
+    └── vercel.json                    # Vercel deployment config
 ```
 
 ## Hardware
@@ -58,7 +96,7 @@ smart-bin-reward-system/
 - Settle delay (5s), measure fill before/after
 - Log to `empty_events`: `emptied` / `handling_no_empty` / `emptied_unconfirmed`
 
-### Reward Flow (New)
+### Reward Flow
 1. RFID tap → read UID via RC522
 2. Start 10s "disposal window" timer
 3. Watch for fill_pct rise + vibration (handling)
@@ -72,41 +110,64 @@ smart-bin-reward-system/
 
 ## Supabase Schema
 
-Tables:
-- `devices` — device_id (PK), location, created_at
-- `bin_readings` — fill % over time
-- `empty_events` — bin collections
-- `citizens` — card_uid (PK), name, points_balance
-- `reward_events` — disposal attempts
-- `redemptions` — point redemptions
+### Authentication Tables
+- `profiles` — User profiles (extends auth.users)
+  - `id` (UUID, FK to auth.users)
+  - `email`, `full_name`, `account_type` (civilian/admin)
+  - `card_uid` (unique, for civilians only)
 
-Triggers:
-- `award_points_on_reward()` — increments `citizens.points_balance` on confirmed rewards
+### Data Tables
+- `devices` — Bin registry
+- `bin_readings` — Fill % time series
+- `empty_events` — Bin collections
+- `citizens` — Points balance (linked to profiles via user_id)
+- `reward_events` — Disposal attempts
+- `redemptions` — Point redemptions
 
-Functions:
-- `redeem_points(card_uid, points)` — generates 8-char redemption code, deducts points
+### Triggers
+- `create_profile_for_user()` — Auto-creates profile on signup
+- `award_points_on_reward()` — Increments points on confirmed rewards
 
-RLS:
-- All tables enabled for anon key (exhibition/demo only)
-- **Production note**: Replace with service role key + proper auth
+### Functions
+- `link_rfid_to_user()` — Links RFID card to user account
+- `redeem_points()` — Generates redemption code, deducts points
 
-Realtime:
+### RLS Policies
+- **Civilians**: Read only their own profile, citizens record, reward_events, redemptions
+- **Admins**: Read/update all devices, bin_readings, empty_events
+- **Anon (firmware)**: Insert to devices, bin_readings, empty_events, reward_events
+
+### Realtime
 - Enabled on all tables for live PWA updates
 
 ## PWA Features
 
-### Views
-1. **Fleet View** — All bins, sorted by fill %, status badges (ok/needs pickup/offline), rename location
-2. **Bin Detail** — Fill gauge, 24h chart, empty event history
-3. **Citizen Lookup** — Enter card UID, show balance + reward history
-4. **Redeem Flow** — Generate redemption codes, deduct points
-5. **Admin Audit** — Recent reward_events, filter by confidence, fraud detection
+### Authentication
+- Login/Register with email + password
+- Auto-create profile on signup
+- RFID card linking during registration
+- Session persistence (stay logged in)
+- Logout functionality
 
-### Features
-- Realtime updates (Supabase subscriptions)
+### Civilian Dashboard
+- Large points balance display
+- RFID card badge
+- Stats: Total disposals, points earned, points redeemed, success rate
+- Recent activity feed
+- Redemption history
+
+### Admin Dashboard
+- Fleet view (all bins, sorted by fill %)
+- Bin detail (chart, events)
+- Reward audit (filter by confidence)
+- Edit bin locations
+- Real-time updates
+
+### Universal Features
 - Dark theme UI
-- Push notifications when bin crosses 80% fill
-- Installable PWA (manifest.json + service worker)
+- Realtime Supabase subscriptions
+- Push notifications at 80% fill
+- PWA install button (disappears after install)
 - Responsive design (mobile + desktop)
 
 ## Setup & Deployment
@@ -115,7 +176,10 @@ Realtime:
 
 1. Create a new Supabase project at https://supabase.com
 2. Go to SQL Editor and run `schema.sql`
-3. Copy your project URL and anon key
+3. Configure authentication:
+   - Go to Authentication → Providers
+   - Enable Email provider (built-in)
+4. Copy your project URL and anon key
 
 ### 2. Firmware Setup
 
@@ -145,6 +209,8 @@ Deploy to Vercel:
 vercel --prod
 ```
 
+**Important**: Set Root Directory to `pwa` in Vercel settings!
+
 ## Configuration Values (already set)
 
 - **WiFi SSID**: `VIPUl1`
@@ -153,23 +219,71 @@ vercel --prod
 - **Supabase Anon Key**: (set in firmware + PWA)
 - **Default Bin Height**: 25 cm
 
+## Testing the System
+
+### 1. Test Authentication
+1. Open PWA → Click "Register here"
+2. Choose account type
+3. Fill in details (include RFID UID for civilian)
+4. Check email for verification
+5. Login with credentials
+
+### 2. Test Civilian Flow
+1. Login as civilian
+2. See points balance (starts at 0)
+3. Tap RFID card at bin → drop trash
+4. Points auto-update in real-time
+5. View activity history
+
+### 3. Test Admin Flow
+1. Register as admin (no RFID needed)
+2. Login → See fleet view
+3. View all bins, edit locations
+4. Check reward audit for fraud patterns
+
+### 4. Test PWA Install
+1. Open PWA in Chrome/Edge/Safari
+2. Look for "Install App" button (top-right)
+3. Click to install
+4. Button disappears after install
+5. Launch from home screen
+
 ## Security Considerations for Production
 
-⚠️ **This v1 uses anon key access for exhibition/demo purposes.**
+⚠️ **This v1 uses anon key for firmware + authenticated users for PWA.**
 
-A real municipal rollout should:
+**Before municipal production rollout**:
 1. Replace anon key with service role key for firmware POST operations
-2. Implement proper citizen authentication (OAuth, JWT, etc.)
-3. Restrict redemption endpoint to authenticated admin users only
-4. Add audit logging for all point deductions
-5. Implement fraud detection (multiple disposals in short time)
-6. Add geofencing to prevent reward events from unauthorized devices
-7. Encrypt sensitive PII (citizen names, contact info)
+2. Implement admin email verification (currently any email can register as admin)
+3. Add admin invitation system (only existing admins can create new admins)
+4. Encrypt sensitive PII (citizen names, contact info)
+5. Add audit logging for all admin actions
+6. Implement rate limiting on registration endpoint
+7. Add CAPTCHA to prevent automated registrations
+8. Require email verification before account activation
+9. Implement password strength requirements
+10. Add 2FA for admin accounts
 
-## License
+### Recommended Admin Setup Flow (Production)
+1. First admin: Manually insert via SQL with verified email
+2. Subsequent admins: Existing admin invites via email + temporary password
+3. Civilians: Self-registration with email verification + admin approval for RFID linking
 
-MIT
+## Scaling Considerations
 
-## Contributing
+- For >100 bins: partition `bin_readings` by month
+- For >1000 PWA clients: switch from Realtime to polling
+- Add materialized views for dashboard aggregations
+- Archive data >90 days to cold storage
+- Use Supabase connection pooling (automatic)
 
-Issues and pull requests welcome.
+## 📞 Support
+
+For issues or questions, open an issue on GitHub:
+https://github.com/anvitraut1-eng/smart-bin-reward-system/issues
+
+---
+
+**Build completed**: 2026-08-24
+**Version**: 2.0 (Authentication added)
+**Status**: ✅ Code ready, ⏳ Awaiting Supabase schema deployment + Vercel deployment
