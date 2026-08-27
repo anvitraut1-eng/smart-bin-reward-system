@@ -22,14 +22,16 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include "time.h"
+#include "arduino_secrets.h"
 
 // ============================================================================
 // CONFIGURATION - UPDATE THESE FOR YOUR DEPLOYMENT
 // ============================================================================
 
-// WiFi credentials
-const char* WIFI_SSID = "VIPUl1";
-const char* WIFI_PASSWORD = "vipul@india";
+// WiFi credentials - kept in a gitignored header so they stay out of the repo.
+// Copy arduino_secrets.h.example to arduino_secrets.h and fill it in.
+const char* WIFI_SSID = WIFI_SSID_VALUE;
+const char* WIFI_PASSWORD = WIFI_PASSWORD_VALUE;
 
 // Supabase configuration
 const char* SUPABASE_URL = "https://bpecehlmvzuirxmruvyt.supabase.co/rest/v1";
@@ -48,6 +50,11 @@ String DEVICE_ID = "BIN_ESP32_001";  // Change this for each deployed bin
 
 // Default bin height (cm) - overridden by calibration
 const float DEFAULT_BIN_HEIGHT = 25.0;
+
+// Bin geometry and waste properties, used to estimate disposal mass without a
+// load cell. Measure the bin's internal diameter and set it here.
+const float BIN_DIAMETER_CM = 30.0;
+const float WASTE_DENSITY_KG_M3 = 150.0;  // loose mixed municipal waste
 
 // Reward system constants (v1 placeholder rules - CONFIRM BEFORE PRODUCTION)
 const int POINTS_PER_DISPOSAL = 10;
@@ -172,29 +179,22 @@ float calculateFillPct(float distance) {
   return constrain(fillPct, 0.0, 100.0);
 }
 
-// Estimate weight from fill percentage rise
-// Uses approximate density values for mixed municipal waste
-float estimateWeight(float fillRise, float currentFillPct) {
-  // Approximate municipal waste density: ~150 kg/m³ (loose)
-  // Bin dimensions assumed cylindrical: diameter 30cm, height 25cm
-  // Volume = π * r² * h = π * 0.15² * 0.25 ≈ 0.0177 m³
+// Estimate disposal mass from the fill-percentage rise.
+// No load cell is fitted, so mass is inferred from volume: the bin is treated
+// as a cylinder whose usable depth is the calibrated empty-bin distance, and
+// the added volume is multiplied by an assumed waste density. This is a rough
+// figure - good enough for trend reporting, not for billing.
+float estimateWeight(float fillRise) {
+  float radiusM = (BIN_DIAMETER_CM / 100.0) / 2.0;
+  float heightM = calibratedBaseline / 100.0;  // calibrated usable depth
 
-  const float BIN_DIAMETER_M = 0.30;  // 30 cm diameter
-  const float BIN_HEIGHT_M = 0.25;    // 25 cm height
-  const float WASTE_DENSITY_KG_M3 = 150.0;  // kg per cubic meter (mixed municipal)
-
-  float binVolumeM3 = 3.14159 * (BIN_DIAMETER_M / 2) * (BIN_DIAMETER_M / 2) * BIN_HEIGHT_M;
-
-  // Convert fill rise percentage to volume
-  float fillRiseFraction = fillRise / 100.0;
-  float volumeAddedM3 = binVolumeM3 * fillRiseFraction;
-
-  // Calculate weight
+  float binVolumeM3 = 3.14159 * radiusM * radiusM * heightM;
+  float volumeAddedM3 = binVolumeM3 * (fillRise / 100.0);
   float weightKg = volumeAddedM3 * WASTE_DENSITY_KG_M3;
 
-  // Sanity check: typical disposal is 0.1 - 5 kg
+  // Clamp to a plausible range for a single disposal
   if (weightKg < 0.01) weightKg = 0.01;  // Minimum 10g
-  if (weightKg > 20.0) weightKg = 20.0;   // Maximum 20kg (sanity limit)
+  if (weightKg > 20.0) weightKg = 20.0;  // Sanity limit
 
   return weightKg;
 }
@@ -555,21 +555,23 @@ void checkDisposalInWindow() {
         Serial.println(fillRise);
 
         if (fillRise >= MIN_FILL_RISE_PCT) {
-          // Disposal detected - but card registration unknown
-          // Use "pending_link" confidence so backend can check if card is registered
+          // Disposal detected. We cannot tell from the device whether this card
+          // is registered, so report "pending_link" and let the backend decide:
+          // registered cards are promoted to "confirmed", unknown cards get a
+          // pending_card_links row for the citizen to claim in the PWA.
           Serial.println("DISPOSAL DETECTED - sending as pending_link for card registration check");
 
-          // Estimate weight from fill rise (approximate density)
-          float weightEstimate = estimateWeight(fillRise, rewardSession.fillAtTap);
+          // No load cell fitted - estimate mass from the volume of the fill rise
+          float weightEstimate = estimateWeight(fillRise);
 
           String payload = "{\"card_uid\":\"" + rewardSession.cardUID +
                            "\",\"device_id\":\"" + DEVICE_ID +
                            "\",\"fill_pct_before\":" + String(rewardSession.fillAtTap, 1) +
-                           "\",\"fill_pct_after\":" + String(fillAfter, 1) +
-                           "\",\"weight_estimate_kg\":" + String(weightEstimate, 2) +
-                           "\",\"points_awarded\":0" +
-                           "\",\"confidence\":\"pending_link\"" +
-                           "\",\"timestamp\":\"" + getTimestamp() + "\"}";
+                           ",\"fill_pct_after\":" + String(fillAfter, 1) +
+                           ",\"weight_estimate_kg\":" + String(weightEstimate, 2) +
+                           ",\"points_awarded\":0" +
+                           ",\"confidence\":\"pending_link\"" +
+                           ",\"timestamp\":\"" + getTimestamp() + "\"}";
 
           if (!postToSupabase("reward_events", payload)) {
             bufferEvent("reward_events", payload);
@@ -578,6 +580,12 @@ void checkDisposalInWindow() {
           rewardSession.disposalDetected = true;
           rewardSession.active = false;
           currentFillPct = fillAfter;
+        } else {
+          // Handling motion but no real fill rise. Leave the session open so the
+          // window can expire naturally and log "no_disposal".
+          Serial.println("Motion detected but fill rise below threshold - still waiting");
+        }
+      }
     }
   }
 }

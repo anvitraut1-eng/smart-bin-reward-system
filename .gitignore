@@ -29,6 +29,12 @@ Thumbs.db
 *.ino.map
 arduino_output/
 
+# Firmware WiFi credentials - keep the template, never the real file
+arduino_secrets.h
+*/arduino_secrets.h
+!arduino_secrets.h.example
+!*/arduino_secrets.h.example
+
 # Logs
 *.log
 npm-debug.log*
