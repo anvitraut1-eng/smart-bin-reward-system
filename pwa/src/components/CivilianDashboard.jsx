@@ -1,11 +1,14 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
+import CardLinkModal from './CardLinkModal';
 
 function CivilianDashboard({ profile, onLogout }) {
   const [citizenData, setCitizenData] = useState(null);
   const [rewardHistory, setRewardHistory] = useState([]);
   const [redemptions, setRedemptions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [showCardLinkModal, setShowCardLinkModal] = useState(false);
+  const [pendingCardsCount, setPendingCardsCount] = useState(0);
 
   useEffect(() => {
     if (profile.card_uid) {
@@ -45,7 +48,31 @@ function CivilianDashboard({ profile, onLogout }) {
         supabase.removeChannel(channel);
       };
     }
-  }, [profile.card_uid]);
+
+    // Check for pending cards (for users without linked cards yet)
+    checkPendingCards();
+  }, [profile.card_uid, profile.id]);
+
+  const checkPendingCards = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('pending_card_links')
+        .select('id', { count: 'exact', head: true })
+        .eq('claimed', false)
+        .gt('expires_at', new Date().toISOString());
+
+      if (error) throw error;
+      const count = data?.length || 0;
+      setPendingCardsCount(count);
+
+      // Auto-show modal if user has no card linked yet and there are pending cards
+      if (!profile.card_uid && count > 0) {
+        setShowCardLinkModal(true);
+      }
+    } catch (err) {
+      console.error('Error checking pending cards:', err);
+    }
+  };
 
   const fetchCitizenData = async () => {
     try {
@@ -100,7 +127,8 @@ function CivilianDashboard({ profile, onLogout }) {
     const colors = {
       confirmed: '#44ff44',
       no_disposal: '#ffaa00',
-      rate_limited: '#ff4444'
+      rate_limited: '#ff4444',
+      pending_link: '#4488ff'
     };
     return (
       <span
@@ -131,18 +159,43 @@ function CivilianDashboard({ profile, onLogout }) {
       </header>
 
       <main className="dashboard-main">
+        {/* Card Link Banner - shown when no card is linked */}
+        {!profile.card_uid && (
+          <div className="card-link-banner">
+            <div className="banner-icon">🎴</div>
+            <div className="banner-content">
+              <h3>Link Your RFID Card</h3>
+              <p>
+                {pendingCardsCount > 0
+                  ? `We detected ${pendingCardsCount} card tap${pendingCardsCount > 1 ? 's' : ''} waiting for confirmation!`
+                  : 'Tap your RFID card at any smart bin to start earning points.'}
+              </p>
+            </div>
+            <button
+              className="primary-btn"
+              onClick={() => setShowCardLinkModal(true)}
+            >
+              {pendingCardsCount > 0 ? 'Link Card Now' : 'Learn More'}
+            </button>
+          </div>
+        )}
+
         {/* Points Balance Card */}
         <div className="points-card">
           <div className="points-header">
             <h2>Your Points Balance</h2>
-            <span className="rfid-badge">RFID: {profile.card_uid}</span>
+            <span className="rfid-badge">
+              {profile.card_uid ? `RFID: ${profile.card_uid}` : 'No card linked'}
+            </span>
           </div>
           <div className="points-display">
             <div className="points-value">{citizenData?.points_balance || 0}</div>
             <div className="points-label">points</div>
           </div>
           <p className="points-hint">
-            Tap your RFID card at any smart bin when disposing waste to earn 10 points per disposal!
+            {profile.card_uid
+              ? 'Tap your RFID card at any smart bin when disposing waste to earn 10 points per disposal!'
+              : 'Link your RFID card above to start earning points!'}
           </p>
         </div>
 
@@ -229,6 +282,17 @@ function CivilianDashboard({ profile, onLogout }) {
           </div>
         )}
       </main>
+
+      {/* Card Link Modal */}
+      {showCardLinkModal && (
+        <CardLinkModal
+          userId={profile.id}
+          onClose={() => {
+            setShowCardLinkModal(false);
+            checkPendingCards();
+          }}
+        />
+      )}
     </div>
   );
 }

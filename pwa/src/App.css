@@ -1020,4 +1020,282 @@ body {
   .events-table {
     min-width: 800px;
   }
+
+  /* Card Link Modal */
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.75);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 20px;
+  }
+
+  .modal-content {
+    background: #1e293b;
+    border-radius: 16px;
+    max-width: 600px;
+    width: 100%;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  }
+
+  .modal-header {
+    padding: 24px;
+    border-bottom: 1px solid #334155;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .modal-header h2 {
+    margin: 0;
+    color: #f1f5f9;
+    font-size: 24px;
+  }
+
+  .close-btn {
+    background: none;
+    border: none;
+    color: #94a3b8;
+    font-size: 32px;
+    cursor: pointer;
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    transition: all 0.2s;
+  }
+
+  .close-btn:hover {
+    background: #334155;
+    color: #f1f5f9;
+  }
+
+  .modal-body {
+    padding: 24px;
+  }
+
+  .info-text {
+    color: #cbd5e1;
+    font-size: 16px;
+    margin-bottom: 20px;
+    line-height: 1.5;
+  }
+
+  .card-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .pending-card-item {
+    background: #0f172a;
+    border: 2px solid #334155;
+    border-radius: 12px;
+    padding: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: all 0.2s;
+  }
+
+  .pending-card-item:hover {
+    border-color: #00aaff;
+    transform: translateY(-2px);
+  }
+
+  .card-info {
+    flex: 1;
+  }
+
+  .card-uid {
+    font-family: monospace;
+    font-size: 18px;
+    font-weight: bold;
+    color: #00aaff;
+    margin-bottom: 4px;
+  }
+
+  .card-details {
+    font-size: 13px;
+    color: #94a3b8;
+  }
+
+  .claim-btn {
+    background: linear-gradient(135deg, #00aaff 0%, #0088cc 100%);
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 14px;
+  }
+
+  .claim-btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 170, 255, 0.4);
+  }
+
+  .claim-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .no-cards {
+    text-align: center;
+    color: #94a3b8;
+    padding: 32px 16px;
+    font-size: 16px;
+    background: #0f172a;
+    border-radius: 12px;
+    border: 2px dashed #334155;
+  }
+
+  .modal-footer {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid #334155;
+  }
+
+  .help-text {
+    color: #94a3b8;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .help-text strong {
+    color: #f1f5f9;
+  }
+
+  /* Card Link Banner */
+  .card-link-banner {
+    background: linear-gradient(135deg, #00aaff 0%, #0088cc 100%);
+    border-radius: 16px;
+    padding: 20px;
+    margin-bottom: 20px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    box-shadow: 0 4px 20px rgba(0, 170, 255, 0.3);
+  }
+
+  .banner-icon {
+    font-size: 48px;
+    flex-shrink: 0;
+  }
+
+  .banner-content {
+    flex: 1;
+  }
+
+  .banner-content h3 {
+    margin: 0 0 4px 0;
+    color: white;
+    font-size: 18px;
+  }
+
+  .banner-content p {
+    margin: 0;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 14px;
+    line-height: 1.4;
+  }
+
+  .card-link-banner button {
+    background: white;
+    color: #0088cc;
+    font-weight: 700;
+    padding: 10px 20px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+
+  .card-link-banner button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  }
+
+  /* Info Banner in Register */
+  .info-banner {
+    background: rgba(0, 170, 255, 0.1);
+    border: 1px solid #00aaff;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+  }
+
+  .info-banner strong {
+    color: #00aaff;
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  .info-banner p {
+    margin: 0;
+    color: #cbd5e1;
+    font-size: 14px;
+    line-height: 1.4;
+  }
+}
+
+/* Mobile Responsive for Modal */
+@media (max-width: 768px) {
+  .modal-overlay {
+    padding: 10px;
+  }
+
+  .modal-content {
+    max-height: 95vh;
+  }
+
+  .modal-header {
+    padding: 16px;
+  }
+
+  .modal-header h2 {
+    font-size: 20px;
+  }
+
+  .modal-body {
+    padding: 16px;
+  }
+
+  .pending-card-item {
+    flex-direction: column;
+    gap: 12px;
+    align-items: stretch;
+  }
+
+  .claim-btn {
+    width: 100%;
+  }
+
+  .card-link-banner {
+    flex-direction: column;
+    text-align: center;
+  }
+
+  .banner-icon {
+    font-size: 36px;
+  }
+
+  .card-link-banner button {
+    width: 100%;
+  }
 }

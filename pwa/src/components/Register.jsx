@@ -8,7 +8,6 @@ function Register({ onSuccess, onSwitchToLogin }) {
     confirmPassword: '',
     fullName: '',
     accountType: 'civilian',
-    cardUID: '',
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -35,11 +34,6 @@ function Register({ onSuccess, onSwitchToLogin }) {
       return;
     }
 
-    if (formData.accountType === 'civilian' && !formData.cardUID.trim()) {
-      setError('RFID Card UID is required for civilian accounts');
-      return;
-    }
-
     setLoading(true);
 
     try {
@@ -57,22 +51,12 @@ function Register({ onSuccess, onSwitchToLogin }) {
 
       if (signUpError) throw signUpError;
 
-      // If civilian account, link RFID card
-      if (formData.accountType === 'civilian' && authData.user) {
-        const { error: linkError } = await supabase.rpc('link_rfid_to_user', {
-          p_user_id: authData.user.id,
-          p_card_uid: formData.cardUID.toUpperCase(),
-        });
-
-        if (linkError) {
-          // If linking fails, still allow registration but show warning
-          console.error('RFID linking error:', linkError);
-          setError(`Account created but RFID linking failed: ${linkError.message}. Contact admin.`);
-        }
-      }
-
       // Success
-      alert('Registration successful! Please check your email to verify your account, then login.');
+      if (formData.accountType === 'civilian') {
+        alert('Registration successful! Check your email to verify. After login, tap your RFID card at any bin to start earning points.');
+      } else {
+        alert('Admin registration successful! Please check your email to verify your account, then login.');
+      }
       onSuccess();
     } catch (error) {
       console.error('Registration error:', error);
@@ -127,19 +111,9 @@ function Register({ onSuccess, onSwitchToLogin }) {
         </div>
 
         {formData.accountType === 'civilian' && (
-          <div className="form-group">
-            <label>RFID Card UID</label>
-            <input
-              type="text"
-              name="cardUID"
-              value={formData.cardUID}
-              onChange={handleChange}
-              placeholder="ABCD1234 (from your RFID card)"
-              required
-            />
-            <p className="help-text">
-              Enter the unique ID from your RFID card. You'll use this card at bins to earn points.
-            </p>
+          <div className="info-banner">
+            <strong>📱 How to link your RFID card:</strong>
+            <p>After registration and login, simply tap your RFID card at any smart bin. We'll automatically detect it and ask you to confirm linking it to your account. No need to type the card ID manually!</p>
           </div>
         )}
 

@@ -172,6 +172,33 @@ float calculateFillPct(float distance) {
   return constrain(fillPct, 0.0, 100.0);
 }
 
+// Estimate weight from fill percentage rise
+// Uses approximate density values for mixed municipal waste
+float estimateWeight(float fillRise, float currentFillPct) {
+  // Approximate municipal waste density: ~150 kg/m³ (loose)
+  // Bin dimensions assumed cylindrical: diameter 30cm, height 25cm
+  // Volume = π * r² * h = π * 0.15² * 0.25 ≈ 0.0177 m³
+
+  const float BIN_DIAMETER_M = 0.30;  // 30 cm diameter
+  const float BIN_HEIGHT_M = 0.25;    // 25 cm height
+  const float WASTE_DENSITY_KG_M3 = 150.0;  // kg per cubic meter (mixed municipal)
+
+  float binVolumeM3 = 3.14159 * (BIN_DIAMETER_M / 2) * (BIN_DIAMETER_M / 2) * BIN_HEIGHT_M;
+
+  // Convert fill rise percentage to volume
+  float fillRiseFraction = fillRise / 100.0;
+  float volumeAddedM3 = binVolumeM3 * fillRiseFraction;
+
+  // Calculate weight
+  float weightKg = volumeAddedM3 * WASTE_DENSITY_KG_M3;
+
+  // Sanity check: typical disposal is 0.1 - 5 kg
+  if (weightKg < 0.01) weightKg = 0.01;  // Minimum 10g
+  if (weightKg > 20.0) weightKg = 20.0;   // Maximum 20kg (sanity limit)
+
+  return weightKg;
+}
+
 // Get ISO8601 timestamp
 String getTimestamp() {
   struct tm timeinfo;
@@ -475,6 +502,7 @@ void startRewardSession(String cardUID) {
 
   Serial.print("Reward session started for card: ");
   Serial.println(cardUID);
+  Serial.println("Note: Card registration status unknown - will use 'pending_link' confidence");
 }
 
 void checkDisposalInWindow() {
@@ -527,16 +555,21 @@ void checkDisposalInWindow() {
         Serial.println(fillRise);
 
         if (fillRise >= MIN_FILL_RISE_PCT) {
-          // Confirmed disposal!
-          Serial.println("DISPOSAL CONFIRMED - awarding points");
+          // Disposal detected - but card registration unknown
+          // Use "pending_link" confidence so backend can check if card is registered
+          Serial.println("DISPOSAL DETECTED - sending as pending_link for card registration check");
+
+          // Estimate weight from fill rise (approximate density)
+          float weightEstimate = estimateWeight(fillRise, rewardSession.fillAtTap);
 
           String payload = "{\"card_uid\":\"" + rewardSession.cardUID +
                            "\",\"device_id\":\"" + DEVICE_ID +
                            "\",\"fill_pct_before\":" + String(rewardSession.fillAtTap, 1) +
-                           ",\"fill_pct_after\":" + String(fillAfter, 1) +
-                           ",\"points_awarded\":" + String(POINTS_PER_DISPOSAL) +
-                           ",\"confidence\":\"confirmed\"" +
-                           ",\"timestamp\":\"" + getTimestamp() + "\"}";
+                           "\",\"fill_pct_after\":" + String(fillAfter, 1) +
+                           "\",\"weight_estimate_kg\":" + String(weightEstimate, 2) +
+                           "\",\"points_awarded\":0" +
+                           "\",\"confidence\":\"pending_link\"" +
+                           "\",\"timestamp\":\"" + getTimestamp() + "\"}";
 
           if (!postToSupabase("reward_events", payload)) {
             bufferEvent("reward_events", payload);
@@ -545,8 +578,6 @@ void checkDisposalInWindow() {
           rewardSession.disposalDetected = true;
           rewardSession.active = false;
           currentFillPct = fillAfter;
-        }
-      }
     }
   }
 }
