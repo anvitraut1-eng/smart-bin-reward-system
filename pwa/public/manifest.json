@@ -3,31 +3,13 @@
   "short_name": "Smart Bin",
   "description": "Municipal smart bin monitoring and citizen reward system",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
   "background_color": "#0a0a0a",
   "theme_color": "#00aaff",
   "orientation": "portrait-primary",
   "icons": [
-    {
-      "src": "/bin-icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any maskable"
-    },
-    {
-      "src": "/bin-icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any maskable"
-    }
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
   ],
-  "categories": ["utilities", "productivity", "government"],
-  "screenshots": [
-    {
-      "src": "/screenshot.png",
-      "sizes": "1280x720",
-      "type": "image/png",
-      "form_factor": "wide"
-    }
-  ]
+  "categories": ["utilities", "productivity"]
 }
