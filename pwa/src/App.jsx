@@ -11,27 +11,19 @@ function App() {
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState('login'); // login, register
+  const [view, setView] = useState('login');
 
   useEffect(() => {
-    // Check active session
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null);
-      if (session?.user) {
-        fetchProfile(session.user.id);
-      } else {
-        setLoading(false);
-      }
+      if (session?.user) fetchProfile(session.user.id);
+      else setLoading(false);
     });
 
-    // Listen for auth changes
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setUser(session?.user ?? null);
-      if (session?.user) {
-        fetchProfile(session.user.id);
-      } else {
+      if (session?.user) fetchProfile(session.user.id);
+      else {
         setProfile(null);
         setLoading(false);
       }
@@ -41,6 +33,11 @@ function App() {
   }, []);
 
   const fetchProfile = async (userId) => {
+    if (!userId) {
+      setLoading(false);
+      return;
+    }
+
     try {
       const { data, error } = await supabase
         .from('profiles')
@@ -52,6 +49,7 @@ function App() {
       setProfile(data);
     } catch (error) {
       console.error('Error fetching profile:', error);
+      setProfile(null);
     } finally {
       setLoading(false);
     }
@@ -73,7 +71,6 @@ function App() {
     );
   }
 
-  // Not logged in - show login/register
   if (!user || !profile) {
     return (
       <div className="auth-container">
@@ -83,9 +80,8 @@ function App() {
             <h1>🗑️ Smart Bin System</h1>
             <p>Municipal Waste Management & Rewards</p>
           </div>
-
           {view === 'login' ? (
-            <Login onSuccess={() => fetchProfile(user?.id)} onSwitchToRegister={() => setView('register')} />
+            <Login onSuccess={fetchProfile} onSwitchToRegister={() => setView('register')} />
           ) : (
             <Register onSuccess={() => setView('login')} onSwitchToLogin={() => setView('login')} />
           )}
@@ -94,7 +90,6 @@ function App() {
     );
   }
 
-  // Logged in - show appropriate dashboard
   return (
     <div className="app">
       <InstallButton />
