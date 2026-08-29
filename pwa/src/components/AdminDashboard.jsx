@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { supabase } from '../lib/supabase';
 import FleetView from './FleetView';
 import BinDetail from './BinDetail';
 import AdminAudit from './AdminAudit';
