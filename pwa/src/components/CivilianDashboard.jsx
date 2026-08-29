@@ -11,14 +11,15 @@ function CivilianDashboard({ profile, onLogout }) {
   const [pendingCardsCount, setPendingCardsCount] = useState(0);
 
   useEffect(() => {
-    let channel;
+    let channels = [];
+    let cancelled = false;
 
     const load = async () => {
       if (profile.card_uid) {
         await Promise.all([fetchCitizenData(), fetchRewardHistory(), fetchRedemptions()]);
 
-        channel = supabase
-          .channel(`civilian-${profile.card_uid}`)
+        const channel = supabase
+          .channel(`civilian-${profile.id}`)
           .on('postgres_changes', {
             event: '*', schema: 'public', table: 'citizens',
             filter: `card_uid=eq.${profile.card_uid}`
@@ -31,20 +32,36 @@ function CivilianDashboard({ profile, onLogout }) {
             fetchRewardHistory();
           })
           .subscribe();
+        channels.push(channel);
       } else {
-        await checkPendingCards();
-        setLoading(false);
+        await checkPendingCards(true);
+
+        // An unlinked civilian stays subscribed. When an ESP32 creates a
+        // pending card link, the confirmation modal appears automatically.
+        const channel = supabase
+          .channel(`pending-cards-${profile.id}`)
+          .on('postgres_changes', {
+            event: 'INSERT', schema: 'public', table: 'pending_card_links'
+          }, () => checkPendingCards(true))
+          .on('postgres_changes', {
+            event: 'UPDATE', schema: 'public', table: 'pending_card_links'
+          }, () => checkPendingCards(false))
+          .subscribe();
+        channels.push(channel);
       }
+
+      if (!cancelled) setLoading(false);
     };
 
     load();
 
     return () => {
-      if (channel) supabase.removeChannel(channel);
+      cancelled = true;
+      channels.forEach((channel) => supabase.removeChannel(channel));
     };
-  }, [profile.card_uid]);
+  }, [profile.id, profile.card_uid]);
 
-  const checkPendingCards = async () => {
+  const checkPendingCards = async (openModal = false) => {
     try {
       const { count, error } = await supabase
         .from('pending_card_links')
@@ -55,7 +72,7 @@ function CivilianDashboard({ profile, onLogout }) {
       if (error) throw error;
       const pendingCount = count || 0;
       setPendingCardsCount(pendingCount);
-      if (!profile.card_uid && pendingCount > 0) setShowCardLinkModal(true);
+      if (openModal && !profile.card_uid && pendingCount > 0) setShowCardLinkModal(true);
     } catch (err) {
       console.error('Error checking pending cards:', err);
     }
@@ -63,8 +80,7 @@ function CivilianDashboard({ profile, onLogout }) {
 
   const fetchCitizenData = async () => {
     try {
-      const { data, error } = await supabase
-        .from('citizens').select('*').eq('card_uid', profile.card_uid).single();
+      const { data, error } = await supabase.from('citizens').select('*').eq('card_uid', profile.card_uid).single();
       if (error && error.code !== 'PGRST116') throw error;
       setCitizenData(data || { card_uid: profile.card_uid, points_balance: 0 });
     } catch (error) {
@@ -149,7 +165,7 @@ function CivilianDashboard({ profile, onLogout }) {
         ))}</div></div>}
       </main>
 
-      {showCardLinkModal && <CardLinkModal userId={profile.id} onClose={() => { setShowCardLinkModal(false); checkPendingCards(); }} />}
+      {showCardLinkModal && <CardLinkModal userId={profile.id} onClose={() => { setShowCardLinkModal(false); checkPendingCards(false); }} />}
     </div>
   );
 }
