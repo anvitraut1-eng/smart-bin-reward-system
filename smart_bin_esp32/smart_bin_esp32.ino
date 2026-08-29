@@ -1,21 +1,11 @@
-/*
- * Smart Bin ESP32 - Municipal Waste Monitoring + Citizen Reward System
- *
- * Hardware:
- * - ESP32 DevKit
- * - HC-SR04/JSN-SR04T ultrasonic sensor (Trig, Echo)
- * - SW-420 vibration sensor (interrupt-capable GPIO)
- * - Push button for calibration (GPIO to GND, internal pull-up)
- * - RC522 RFID/NFC reader (SPI: SDA, SCK, MOSI, MISO, RST)
- *
- * Features:
- * - Calibration button for empty-bin baseline
- * - Fill % monitoring with ultrasonic sensor
- * - Vibration-pattern empty detection
- * - RFID tap → citizen reward on confirmed disposal
- * - Offline buffering, WiFi reconnect, NTP sync
+/* Smart Bin ESP32 - FIXED FIRMWARE
+ * Pinout:
+ * HC-SR04 TRIG=5, ECHO=4
+ * SW-420 DO=27
+ * Calibration button=21 (to GND)
+ * RC522 SCK=18 MISO=19 MOSI=23 SS=15 RST=22
+ * Onboard LED=2
  */
-
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <Preferences.h>
@@ -24,90 +14,60 @@
 #include "time.h"
 #include "arduino_secrets.h"
 
-// ============================================================================
-// CONFIGURATION - UPDATE THESE FOR YOUR DEPLOYMENT
-// ============================================================================
-
-// WiFi credentials - kept in a gitignored header so they stay out of the repo.
-// Copy arduino_secrets.h.example to arduino_secrets.h and fill it in.
 const char* WIFI_SSID = WIFI_SSID_VALUE;
 const char* WIFI_PASSWORD = WIFI_PASSWORD_VALUE;
-
-// Supabase configuration
 const char* SUPABASE_URL = "https://bpecehlmvzuirxmruvyt.supabase.co/rest/v1";
 const char* SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJwZWNlaGxtdnp1aXJ4bXJ1dnl0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODY4OTEzMzMsImV4cCI6MjEwMjQ2NzMzM30.LyOps1xtjd1mPVc7OL1e6xLVW6Uu7J7RSPiTEZbZJyU";
 
-// Device ID (unique per bin)
-String DEVICE_ID = "BIN_ESP32_001";  // Change this for each deployed bin
+String DEVICE_ID = "BIN_ESP32_001";
 
-// Hardware pin configuration
 #define TRIG_PIN 5
-#define ECHO_PIN 18
-#define VIBRATION_PIN 19
+#define ECHO_PIN 4
+#define VIBRATION_PIN 27
 #define CALIBRATION_BUTTON_PIN 21
 #define RC522_RST_PIN 22
 #define RC522_SS_PIN 15
+#define ONBOARD_LED_PIN 2
 
-// Default bin height (cm) - overridden by calibration
-const float DEFAULT_BIN_HEIGHT = 25.0;
-
-// Bin geometry and waste properties, used to estimate disposal mass without a
-// load cell. Measure the bin's internal diameter and set it here.
-const float BIN_DIAMETER_CM = 30.0;
-const float WASTE_DENSITY_KG_M3 = 150.0;  // loose mixed municipal waste
-
-// Reward system constants (v1 placeholder rules - CONFIRM BEFORE PRODUCTION)
+const float DEFAULT_BIN_HEIGHT = 25.0f;
+const float BIN_DIAMETER_CM = 30.0f;
+const float WASTE_DENSITY_KG_M3 = 150.0f;
 const int POINTS_PER_DISPOSAL = 10;
-const unsigned long DISPOSAL_WINDOW_MS = 10000;  // 10 seconds after tap
-const unsigned long RATE_LIMIT_MS = 300000;      // 5 minutes
-const float MIN_FILL_RISE_PCT = 2.0;             // Minimum rise to count as disposal
-
-// NTP configuration
-const char* NTP_SERVER = "pool.ntp.org";
-const long GMT_OFFSET_SEC = 19800;  // IST = UTC+5:30
-const int DAYLIGHT_OFFSET_SEC = 0;
-
-// ============================================================================
-// GLOBAL OBJECTS & STATE
-// ============================================================================
+const unsigned long READING_INTERVAL = 30000;
+const unsigned long DISPOSAL_WINDOW_MS = 10000;
+const unsigned long RATE_LIMIT_MS = 300000;
+const float MIN_FILL_RISE_PCT = 2.0f;
+const unsigned long QUIET_PERIOD_MS = 3000;
+const unsigned long SETTLE_MS = 5000;
+const unsigned long BUTTON_DEBOUNCE_MS = 60;
 
 Preferences preferences;
 MFRC522 rfid(RC522_SS_PIN, RC522_RST_PIN);
 
-// Calibration
 float calibratedBaseline = DEFAULT_BIN_HEIGHT;
 bool calibrationValid = false;
-
-// Ultrasonic reading state
+float currentFillPct = 0.0f;
 unsigned long lastReadingTime = 0;
-const unsigned long READING_INTERVAL = 30000;  // 30 seconds
-float currentFillPct = 0.0;
 
-// Vibration detection state
 volatile unsigned long lastVibrationTime = 0;
-volatile int vibrationPulseCount = 0;
+volatile uint32_t vibrationPulseCount = 0;
+volatile bool vibrationPulsePending = false;
+uint32_t processedPulseCount = 0;
+
+bool inMotionWindow = false;
 unsigned long motionWindowStart = 0;
 unsigned long lastMotionTime = 0;
-bool inMotionWindow = false;
-const unsigned long MOTION_WINDOW_MS = 15000;
-const unsigned long QUIET_PERIOD_MS = 3000;
-const unsigned long SETTLE_MS = 5000;
+uint32_t motionStartPulseCount = 0;
+float fillBeforeMotion = 0.0f;
 
-// Empty detection state
-float fillBeforeEmpty = 0.0;
-bool emptyDetectionActive = false;
-
-// Reward system state
 struct RewardSession {
   bool active;
   String cardUID;
   unsigned long startTime;
   float fillAtTap;
-  bool disposalDetected;
 };
-RewardSession rewardSession = {false, "", 0, 0.0, false};
+RewardSession rewardSession = {false, "", 0, 0.0f};
 
-// Rate limiting: store last reward time per card (simple in-memory cache, max 10 cards)
 struct RateLimit {
   String cardUID;
   unsigned long lastRewardTime;
@@ -115,628 +75,364 @@ struct RateLimit {
 RateLimit rateLimitCache[10];
 int rateLimitCacheSize = 0;
 
-// Offline buffering
-struct BufferedEvent {
-  String endpoint;  // "bin_readings", "empty_events", "reward_events"
-  String payload;
-};
+struct BufferedEvent { String endpoint; String payload; };
 BufferedEvent eventBuffer[20];
 int eventBufferSize = 0;
 
-// Calibration button debounce
-unsigned long lastButtonPress = 0;
-const unsigned long BUTTON_DEBOUNCE_MS = 500;
-
-// ============================================================================
-// INTERRUPT SERVICE ROUTINE
-// ============================================================================
+bool lastButtonState = HIGH;
+unsigned long lastButtonChange = 0;
 
 void IRAM_ATTR vibrationISR() {
   lastVibrationTime = millis();
   vibrationPulseCount++;
+  vibrationPulsePending = true;
 }
 
-// ============================================================================
-// UTILITY FUNCTIONS
-// ============================================================================
+void led(bool on) { digitalWrite(ONBOARD_LED_PIN, on ? HIGH : LOW); }
 
-// Median of 5 ultrasonic samples
+void blink(int count, int onMs = 150, int offMs = 150) {
+  for (int i = 0; i < count; i++) {
+    led(true); delay(onMs); led(false);
+    if (i + 1 < count) delay(offMs);
+  }
+}
+
 float readUltrasonicMedian() {
   float samples[5];
+  int n = 0;
   for (int i = 0; i < 5; i++) {
+    digitalWrite(TRIG_PIN, LOW); delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10);
     digitalWrite(TRIG_PIN, LOW);
-    delayMicroseconds(2);
-    digitalWrite(TRIG_PIN, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(TRIG_PIN, LOW);
-
-    long duration = pulseIn(ECHO_PIN, HIGH, 30000);  // 30ms timeout
-    if (duration == 0) {
-      samples[i] = calibratedBaseline;  // Timeout = assume empty
-    } else {
-      samples[i] = duration * 0.034 / 2.0;  // cm
+    unsigned long duration = pulseIn(ECHO_PIN, HIGH, 30000);
+    if (duration > 0) {
+      float d = duration * 0.0343f / 2.0f;
+      if (d >= 2.0f && d <= 400.0f) samples[n++] = d;
     }
-    delay(60);  // HC-SR04 needs ~60ms between readings
+    delay(60);
   }
-
-  // Sort and return median
-  for (int i = 0; i < 4; i++) {
-    for (int j = i + 1; j < 5; j++) {
-      if (samples[i] > samples[j]) {
-        float temp = samples[i];
-        samples[i] = samples[j];
-        samples[j] = temp;
-      }
-    }
-  }
-  return samples[2];
+  if (n < 3) return NAN;
+  for (int i = 0; i < n - 1; i++) for (int j = i + 1; j < n; j++)
+    if (samples[i] > samples[j]) { float t = samples[i]; samples[i] = samples[j]; samples[j] = t; }
+  return samples[n / 2];
 }
 
-// Calculate fill percentage
-float calculateFillPct(float distance) {
-  if (!calibrationValid) return 0.0;
-  float fillPct = ((calibratedBaseline - distance) / calibratedBaseline) * 100.0;
-  return constrain(fillPct, 0.0, 100.0);
+float fillFromDistance(float distance) {
+  if (!calibrationValid || isnan(distance) || calibratedBaseline <= 0) return NAN;
+  return constrain(((calibratedBaseline - distance) / calibratedBaseline) * 100.0f, 0.0f, 100.0f);
 }
 
-// Estimate disposal mass from the fill-percentage rise.
-// No load cell is fitted, so mass is inferred from volume: the bin is treated
-// as a cylinder whose usable depth is the calibrated empty-bin distance, and
-// the added volume is multiplied by an assumed waste density. This is a rough
-// figure - good enough for trend reporting, not for billing.
 float estimateWeight(float fillRise) {
-  float radiusM = (BIN_DIAMETER_CM / 100.0) / 2.0;
-  float heightM = calibratedBaseline / 100.0;  // calibrated usable depth
-
-  float binVolumeM3 = 3.14159 * radiusM * radiusM * heightM;
-  float volumeAddedM3 = binVolumeM3 * (fillRise / 100.0);
-  float weightKg = volumeAddedM3 * WASTE_DENSITY_KG_M3;
-
-  // Clamp to a plausible range for a single disposal
-  if (weightKg < 0.01) weightKg = 0.01;  // Minimum 10g
-  if (weightKg > 20.0) weightKg = 20.0;  // Sanity limit
-
-  return weightKg;
+  float r = (BIN_DIAMETER_CM / 100.0f) / 2.0f;
+  float h = calibratedBaseline / 100.0f;
+  float volume = 3.14159f * r * r * h * (fillRise / 100.0f);
+  float kg = volume * WASTE_DENSITY_KG_M3;
+  return constrain(kg, 0.01f, 20.0f);
 }
 
-// Get ISO8601 timestamp
-String getTimestamp() {
-  struct tm timeinfo;
-  if (!getLocalTime(&timeinfo)) {
-    return "1970-01-01T00:00:00Z";
-  }
-  char buffer[30];
-  strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
-  return String(buffer);
+String timestampUTC() {
+  struct tm t;
+  if (!getLocalTime(&t, 1000)) return "1970-01-01T00:00:00Z";
+  char b[30];
+  strftime(b, sizeof(b), "%Y-%m-%dT%H:%M:%SZ", &t);
+  return String(b);
 }
-
-// ============================================================================
-// NETWORK FUNCTIONS
-// ============================================================================
 
 void connectWiFi() {
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(WIFI_SSID);
-
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
-
+  Serial.print("Connecting to WiFi: "); Serial.println(WIFI_SSID);
+  WiFi.mode(WIFI_STA); WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  for (int i = 0; i < 20 && WiFi.status() != WL_CONNECTED; i++) { delay(500); Serial.print('.'); }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nWiFi connected!");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
-
-    // Sync time
-    configTime(GMT_OFFSET_SEC, DAYLIGHT_OFFSET_SEC, NTP_SERVER);
-    Serial.println("NTP time sync initiated");
-  } else {
-    Serial.println("\nWiFi connection failed - will retry later");
-  }
+    Serial.print("IP address: "); Serial.println(WiFi.localIP());
+    configTime(0, 0, "pool.ntp.org");
+    Serial.println("NTP synchronization started.");
+  } else Serial.println("\nWiFi connection failed - will retry later.");
 }
 
-bool postToSupabase(const char* table, String jsonPayload) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi not connected - buffering event");
-    return false;
-  }
-
+bool postToSupabase(const char* table, const String& payload, bool upsert = false) {
+  if (WiFi.status() != WL_CONNECTED) return false;
   HTTPClient http;
   String url = String(SUPABASE_URL) + "/" + table;
-
-  http.begin(url);
+  if (!http.begin(url)) return false;
+  http.setTimeout(5000);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("apikey", SUPABASE_ANON_KEY);
   http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
-  http.addHeader("Prefer", "return=minimal");
-
-  int httpCode = http.POST(jsonPayload);
-
-  bool success = (httpCode == 201 || httpCode == 200);
-
-  if (success) {
-    Serial.print("POST to ");
-    Serial.print(table);
-    Serial.println(" successful");
-  } else {
-    Serial.print("POST failed: ");
-    Serial.println(httpCode);
-    if (httpCode > 0) {
-      Serial.println(http.getString());
-    }
+  http.addHeader("Prefer", upsert ? "resolution=merge-duplicates, return=minimal" : "return=minimal");
+  int code = http.POST(payload);
+  bool ok = code >= 200 && code < 300;
+  if (!ok) {
+    Serial.print("Supabase POST failed: "); Serial.println(code);
+    if (code > 0) Serial.println(http.getString());
   }
-
   http.end();
-  return success;
+  return ok;
 }
 
-void bufferEvent(const char* endpoint, String payload) {
+void bufferEvent(const char* endpoint, const String& payload) {
   if (eventBufferSize >= 20) {
-    Serial.println("Event buffer full - dropping oldest");
-    for (int i = 0; i < 19; i++) {
-      eventBuffer[i] = eventBuffer[i + 1];
-    }
+    for (int i = 0; i < 19; i++) eventBuffer[i] = eventBuffer[i + 1];
     eventBufferSize = 19;
   }
-
   eventBuffer[eventBufferSize].endpoint = endpoint;
   eventBuffer[eventBufferSize].payload = payload;
   eventBufferSize++;
-
-  Serial.print("Buffered event (");
-  Serial.print(eventBufferSize);
-  Serial.println(" total)");
 }
 
 void flushEventBuffer() {
-  if (WiFi.status() != WL_CONNECTED || eventBufferSize == 0) return;
-
-  Serial.print("Flushing ");
-  Serial.print(eventBufferSize);
-  Serial.println(" buffered events...");
-
-  int flushed = 0;
-  for (int i = 0; i < eventBufferSize; i++) {
-    if (postToSupabase(eventBuffer[i].endpoint.c_str(), eventBuffer[i].payload)) {
-      flushed++;
-    } else {
-      // Failed - keep remaining events in buffer
-      for (int j = 0; j < eventBufferSize - i; j++) {
-        eventBuffer[j] = eventBuffer[i + j];
-      }
-      eventBufferSize = eventBufferSize - i;
-      Serial.print("Flush incomplete - ");
-      Serial.print(eventBufferSize);
-      Serial.println(" events remain buffered");
-      return;
-    }
+  while (WiFi.status() == WL_CONNECTED && eventBufferSize > 0) {
+    if (!postToSupabase(eventBuffer[0].endpoint.c_str(), eventBuffer[0].payload)) return;
+    for (int i = 0; i < eventBufferSize - 1; i++) eventBuffer[i] = eventBuffer[i + 1];
+    eventBufferSize--;
   }
-
-  eventBufferSize = 0;
-  Serial.println("All buffered events flushed");
 }
 
-// ============================================================================
-// CALIBRATION
-// ============================================================================
+void loadCalibration() {
+  if (!preferences.begin("smartbin", true)) return;
+  float saved = preferences.getFloat("baseline", NAN);
+  preferences.end();
+  if (!isnan(saved) && saved > 5.0f && saved < 400.0f) {
+    calibratedBaseline = saved; calibrationValid = true;
+    Serial.print("Loaded saved calibration: "); Serial.print(saved, 1); Serial.println(" cm");
+  } else Serial.println("No valid saved calibration - press button once to calibrate.");
+}
 
-void performCalibration() {
+bool performCalibration() {
   Serial.println("\n=== CALIBRATION START ===");
-  Serial.println("Ensure bin is EMPTY");
-
-  // Blink LED or delay to give user time
+  Serial.println("Keep the bin EMPTY and still...");
+  blink(2, 120, 120);
   delay(1000);
-
   float distance = readUltrasonicMedian();
-
-  if (distance > 5.0 && distance < 400.0) {  // Valid range
-    calibratedBaseline = distance;
-    calibrationValid = true;
-
-    preferences.begin("smartbin", false);
+  if (isnan(distance) || distance <= 5.0f || distance >= 400.0f) {
+    Serial.println("Calibration FAILED - ultrasonic sensor returned invalid data.");
+    blink(5, 100, 100);
+    return false;
+  }
+  calibratedBaseline = distance;
+  calibrationValid = true;
+  if (preferences.begin("smartbin", false)) {
     preferences.putFloat("baseline", calibratedBaseline);
     preferences.end();
-
-    Serial.print("Calibration successful: ");
-    Serial.print(calibratedBaseline);
-    Serial.println(" cm");
-  } else {
-    Serial.print("Calibration failed - invalid distance: ");
-    Serial.println(distance);
   }
-
+  currentFillPct = 0.0f;
+  Serial.print("Calibration successful: "); Serial.print(distance, 1); Serial.println(" cm");
+  blink(3, 180, 180);
   Serial.println("=== CALIBRATION END ===\n");
+  return true;
 }
 
-// ============================================================================
-// BIN MONITORING
-// ============================================================================
+void checkCalibrationButton() {
+  bool state = digitalRead(CALIBRATION_BUTTON_PIN);
+  unsigned long now = millis();
+  if (state != lastButtonState && now - lastButtonChange >= BUTTON_DEBOUNCE_MS) {
+    lastButtonChange = now;
+    lastButtonState = state;
+    if (state == LOW) performCalibration();
+  }
+}
 
 void takeBinReading() {
   float distance = readUltrasonicMedian();
-  currentFillPct = calculateFillPct(distance);
-
-  Serial.print("Fill: ");
-  Serial.print(currentFillPct);
-  Serial.print("% (distance: ");
-  Serial.print(distance);
-  Serial.println(" cm)");
-
-  // Post to Supabase
-  String payload = "{\"device_id\":\"" + DEVICE_ID +
-                   "\",\"fill_pct\":" + String(currentFillPct, 1) +
-                   ",\"timestamp\":\"" + getTimestamp() + "\"}";
-
-  if (!postToSupabase("bin_readings", payload)) {
-    bufferEvent("bin_readings", payload);
-  }
+  if (isnan(distance)) { Serial.println("Ultrasonic read failed - no valid echo."); return; }
+  float fill = fillFromDistance(distance);
+  if (isnan(fill)) return;
+  currentFillPct = fill;
+  Serial.print("Fill: "); Serial.print(fill, 1); Serial.print("% | Distance: "); Serial.print(distance, 1); Serial.println(" cm");
+  String payload = "{\"device_id\":\"" + DEVICE_ID + "\",\"fill_pct\":" + String(fill, 1) + ",\"timestamp\":\"" + timestampUTC() + "\"}";
+  if (!postToSupabase("bin_readings", payload)) bufferEvent("bin_readings", payload);
 }
 
-// ============================================================================
-// EMPTY DETECTION (vibration + fill drop)
-// ============================================================================
-
-void checkEmptyDetection() {
+bool rateLimited(const String& uid) {
   unsigned long now = millis();
-
-  // Check for vibration pulses
-  if (now - lastVibrationTime < 100) {  // Active vibration
-    if (!inMotionWindow) {
-      // Start new motion window
-      motionWindowStart = now;
-      inMotionWindow = true;
-      vibrationPulseCount = 0;
-      fillBeforeEmpty = currentFillPct;
-      Serial.println("Motion window started");
-    }
-    lastMotionTime = now;
-  }
-
-  // Check if motion window should end
-  if (inMotionWindow && (now - lastMotionTime > QUIET_PERIOD_MS)) {
-    // Quiet period ended - classify event
-    int pulseCount = vibrationPulseCount;
-    unsigned long activeDuration = lastMotionTime - motionWindowStart;
-
-    Serial.print("Motion ended - pulses: ");
-    Serial.print(pulseCount);
-    Serial.print(", duration: ");
-    Serial.print(activeDuration);
-    Serial.println(" ms");
-
-    // Classify: bump vs handling
-    bool isHandling = (pulseCount > 3 && activeDuration > 1000);
-
-    if (isHandling) {
-      // Wait for settle, then measure fill
-      Serial.println("Handling detected - settling...");
-      delay(SETTLE_MS);
-
-      float distance = readUltrasonicMedian();
-      float fillAfter = calculateFillPct(distance);
-      float fillDrop = fillBeforeEmpty - fillAfter;
-
-      Serial.print("Fill before: ");
-      Serial.print(fillBeforeEmpty);
-      Serial.print("%, after: ");
-      Serial.print(fillAfter);
-      Serial.print("%, drop: ");
-      Serial.println(fillDrop);
-
-      String eventType;
-      if (fillDrop > 10.0) {
-        eventType = "emptied";
-      } else if (fillDrop > 3.0) {
-        eventType = "emptied_unconfirmed";
-      } else {
-        eventType = "handling_no_empty";
-      }
-
-      // Log to Supabase
-      String payload = "{\"device_id\":\"" + DEVICE_ID +
-                       "\",\"event_type\":\"" + eventType +
-                       "\",\"fill_pct_before\":" + String(fillBeforeEmpty, 1) +
-                       ",\"fill_pct_after\":" + String(fillAfter, 1) +
-                       ",\"pulse_count\":" + String(pulseCount) +
-                       ",\"active_duration_ms\":" + String(activeDuration) +
-                       ",\"timestamp\":\"" + getTimestamp() + "\"}";
-
-      if (!postToSupabase("empty_events", payload)) {
-        bufferEvent("empty_events", payload);
-      }
-
-      currentFillPct = fillAfter;  // Update current state
-    }
-
-    inMotionWindow = false;
-    vibrationPulseCount = 0;
-  }
-}
-
-// ============================================================================
-// REWARD SYSTEM
-// ============================================================================
-
-bool isRateLimited(String cardUID) {
-  unsigned long now = millis();
-  for (int i = 0; i < rateLimitCacheSize; i++) {
-    if (rateLimitCache[i].cardUID == cardUID) {
-      if (now - rateLimitCache[i].lastRewardTime < RATE_LIMIT_MS) {
-        return true;
-      } else {
-        // Expired - update time
-        rateLimitCache[i].lastRewardTime = now;
-        return false;
-      }
-    }
-  }
-
-  // New card - add to cache
-  if (rateLimitCacheSize < 10) {
-    rateLimitCache[rateLimitCacheSize].cardUID = cardUID;
-    rateLimitCache[rateLimitCacheSize].lastRewardTime = now;
-    rateLimitCacheSize++;
-  } else {
-    // Cache full - replace oldest (simple FIFO)
-    for (int i = 0; i < 9; i++) {
-      rateLimitCache[i] = rateLimitCache[i + 1];
-    }
-    rateLimitCache[9].cardUID = cardUID;
-    rateLimitCache[9].lastRewardTime = now;
-  }
-
+  for (int i = 0; i < rateLimitCacheSize; i++)
+    if (rateLimitCache[i].cardUID == uid) return now - rateLimitCache[i].lastRewardTime < RATE_LIMIT_MS;
   return false;
 }
 
-void startRewardSession(String cardUID) {
-  rewardSession.active = true;
-  rewardSession.cardUID = cardUID;
-  rewardSession.startTime = millis();
-  rewardSession.fillAtTap = currentFillPct;
-  rewardSession.disposalDetected = false;
-
-  Serial.print("Reward session started for card: ");
-  Serial.println(cardUID);
-  Serial.println("Note: Card registration status unknown - will use 'pending_link' confidence");
+void recordReward(const String& uid) {
+  unsigned long now = millis();
+  for (int i = 0; i < rateLimitCacheSize; i++) if (rateLimitCache[i].cardUID == uid) { rateLimitCache[i].lastRewardTime = now; return; }
+  if (rateLimitCacheSize < 10) {
+    rateLimitCache[rateLimitCacheSize++] = {uid, now};
+    return;
+  }
+  int oldest = 0;
+  for (int i = 1; i < 10; i++) if (rateLimitCache[i].lastRewardTime < rateLimitCache[oldest].lastRewardTime) oldest = i;
+  rateLimitCache[oldest] = {uid, now};
 }
 
-void checkDisposalInWindow() {
-  if (!rewardSession.active) return;
-
+void updateMotion() {
   unsigned long now = millis();
+  uint32_t pulses; unsigned long lastPulse; bool pending;
+  noInterrupts();
+  pulses = vibrationPulseCount;
+  lastPulse = lastVibrationTime;
+  pending = vibrationPulsePending;
+  vibrationPulsePending = false;
+  interrupts();
 
-  // Check if window expired
-  if (now - rewardSession.startTime > DISPOSAL_WINDOW_MS) {
-    // Window expired - no disposal detected
-    Serial.println("Disposal window expired - no disposal detected");
-
-    String payload = "{\"card_uid\":\"" + rewardSession.cardUID +
-                     "\",\"device_id\":\"" + DEVICE_ID +
-                     "\",\"fill_pct_before\":" + String(rewardSession.fillAtTap, 1) +
-                     ",\"fill_pct_after\":" + String(currentFillPct, 1) +
-                     ",\"points_awarded\":0" +
-                     ",\"confidence\":\"no_disposal\"" +
-                     ",\"timestamp\":\"" + getTimestamp() + "\"}";
-
-    if (!postToSupabase("reward_events", payload)) {
-      bufferEvent("reward_events", payload);
+  bool newPulse = pulses != processedPulseCount;
+  if (newPulse || pending) {
+    processedPulseCount = pulses;
+    if (!inMotionWindow) {
+      inMotionWindow = true;
+      motionWindowStart = now;
+      motionStartPulseCount = pulses;
+      fillBeforeMotion = currentFillPct;
+      Serial.println("Motion window started.");
     }
+    lastMotionTime = lastPulse;
+  }
 
+  if (inMotionWindow && now - lastMotionTime > QUIET_PERIOD_MS) {
+    uint32_t windowPulses = pulses - motionStartPulseCount;
+    unsigned long duration = lastMotionTime - motionWindowStart;
+    bool handling = windowPulses > 3 && duration > 1000;
+
+    if (!rewardSession.active && handling) {
+      Serial.println("Handling detected - settling...");
+      delay(SETTLE_MS);
+      float d = readUltrasonicMedian();
+      float after = fillFromDistance(d);
+      if (!isnan(after)) {
+        float drop = fillBeforeMotion - after;
+        String type = drop > 10.0f ? "emptied" : (drop > 3.0f ? "emptied_unconfirmed" : "handling_no_empty");
+        String payload = "{\"device_id\":\"" + DEVICE_ID + "\",\"event_type\":\"" + type +
+          "\",\"fill_pct_before\":" + String(fillBeforeMotion, 1) +
+          ",\"fill_pct_after\":" + String(after, 1) +
+          ",\"pulse_count\":" + String(windowPulses) +
+          ",\"active_duration_ms\":" + String(duration) +
+          ",\"timestamp\":\"" + timestampUTC() + "\"}";
+        if (!postToSupabase("empty_events", payload)) bufferEvent("empty_events", payload);
+        currentFillPct = after;
+      }
+    }
+    inMotionWindow = false;
+    motionStartPulseCount = pulses;
+  }
+}
+
+void logRewardEvent(const String& uid, const String& confidence, int points) {
+  String payload = "{\"card_uid\":\"" + uid + "\",\"device_id\":\"" + DEVICE_ID +
+    "\",\"fill_pct_before\":" + String(currentFillPct, 1) +
+    ",\"fill_pct_after\":" + String(currentFillPct, 1) +
+    ",\"points_awarded\":" + String(points) +
+    ",\"confidence\":\"" + confidence + "\",\"timestamp\":\"" + timestampUTC() + "\"}";
+  if (!postToSupabase("reward_events", payload)) bufferEvent("reward_events", payload);
+}
+
+void startReward(const String& uid) {
+  rewardSession = {true, uid, millis(), currentFillPct};
+  Serial.print("Reward session started for card: "); Serial.println(uid);
+}
+
+void checkRFID() {
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
+  String uid;
+  for (byte i = 0; i < rfid.uid.size; i++) { if (rfid.uid.uidByte[i] < 0x10) uid += "0"; uid += String(rfid.uid.uidByte[i], HEX); }
+  uid.toUpperCase();
+  rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
+  Serial.print("RFID tap detected: "); Serial.println(uid);
+
+  if (rateLimited(uid)) { Serial.println("Rate limited - tap ignored."); logRewardEvent(uid, "rate_limited", 0); return; }
+  if (rewardSession.active) { Serial.println("Reward session already active - tap ignored."); return; }
+  startReward(uid);
+}
+
+void checkReward() {
+  if (!rewardSession.active) return;
+  unsigned long now = millis();
+  if (now - rewardSession.startTime > DISPOSAL_WINDOW_MS) {
+    Serial.println("Disposal window expired - no disposal detected.");
+    logRewardEvent(rewardSession.cardUID, "no_disposal", 0);
     rewardSession.active = false;
     return;
   }
+  if (!inMotionWindow) return;
 
-  // Check for fill rise + handling motion
-  if (!rewardSession.disposalDetected) {
-    // Look for vibration indicating disposal action
-    if (inMotionWindow && (now - lastVibrationTime < 100)) {
-      // Active handling during window
-      int pulseCount = vibrationPulseCount;
-      unsigned long activeDuration = now - motionWindowStart;
+  uint32_t pulses; unsigned long lastPulse;
+  noInterrupts(); pulses = vibrationPulseCount; lastPulse = lastVibrationTime; interrupts();
+  uint32_t windowPulses = pulses - motionStartPulseCount;
+  unsigned long duration = now - motionWindowStart;
+  if (now - lastPulse > 150 || windowPulses <= 2 || duration <= 500) return;
 
-      if (pulseCount > 2 && activeDuration > 500) {  // Disposal motion threshold
-        // Wait briefly for fill to rise
-        delay(1000);
+  delay(250);
+  float d = readUltrasonicMedian();
+  float after = fillFromDistance(d);
+  if (isnan(after)) return;
+  float rise = after - rewardSession.fillAtTap;
+  Serial.print("Fill at tap: "); Serial.print(rewardSession.fillAtTap, 1); Serial.print("% | current: "); Serial.print(after, 1); Serial.print("% | rise: "); Serial.println(rise, 1);
+  if (rise < MIN_FILL_RISE_PCT) return;
 
-        float distance = readUltrasonicMedian();
-        float fillAfter = calculateFillPct(distance);
-        float fillRise = fillAfter - rewardSession.fillAtTap;
-
-        Serial.print("Fill at tap: ");
-        Serial.print(rewardSession.fillAtTap);
-        Serial.print("%, current: ");
-        Serial.print(fillAfter);
-        Serial.print("%, rise: ");
-        Serial.println(fillRise);
-
-        if (fillRise >= MIN_FILL_RISE_PCT) {
-          // Disposal detected. We cannot tell from the device whether this card
-          // is registered, so report "pending_link" and let the backend decide:
-          // registered cards are promoted to "confirmed", unknown cards get a
-          // pending_card_links row for the citizen to claim in the PWA.
-          Serial.println("DISPOSAL DETECTED - sending as pending_link for card registration check");
-
-          // No load cell fitted - estimate mass from the volume of the fill rise
-          float weightEstimate = estimateWeight(fillRise);
-
-          String payload = "{\"card_uid\":\"" + rewardSession.cardUID +
-                           "\",\"device_id\":\"" + DEVICE_ID +
-                           "\",\"fill_pct_before\":" + String(rewardSession.fillAtTap, 1) +
-                           ",\"fill_pct_after\":" + String(fillAfter, 1) +
-                           ",\"weight_estimate_kg\":" + String(weightEstimate, 2) +
-                           ",\"points_awarded\":0" +
-                           ",\"confidence\":\"pending_link\"" +
-                           ",\"timestamp\":\"" + getTimestamp() + "\"}";
-
-          if (!postToSupabase("reward_events", payload)) {
-            bufferEvent("reward_events", payload);
-          }
-
-          rewardSession.disposalDetected = true;
-          rewardSession.active = false;
-          currentFillPct = fillAfter;
-        } else {
-          // Handling motion but no real fill rise. Leave the session open so the
-          // window can expire naturally and log "no_disposal".
-          Serial.println("Motion detected but fill rise below threshold - still waiting");
-        }
-      }
-    }
-  }
+  float weight = estimateWeight(rise);
+  String payload = "{\"card_uid\":\"" + rewardSession.cardUID + "\",\"device_id\":\"" + DEVICE_ID +
+    "\",\"fill_pct_before\":" + String(rewardSession.fillAtTap, 1) +
+    ",\"fill_pct_after\":" + String(after, 1) +
+    ",\"weight_estimate_kg\":" + String(weight, 2) +
+    ",\"points_awarded\":0,\"confidence\":\"pending_link\",\"timestamp\":\"" + timestampUTC() + "\"}";
+  if (!postToSupabase("reward_events", payload)) bufferEvent("reward_events", payload);
+  recordReward(rewardSession.cardUID);
+  rewardSession.active = false;
+  currentFillPct = after;
+  Serial.println("DISPOSAL CONFIRMED.");
 }
 
-void checkRFIDTap() {
-  // Check if a card is present
-  if (!rfid.PICC_IsNewCardPresent()) return;
-  if (!rfid.PICC_ReadCardSerial()) return;
-
-  // Read UID
-  String cardUID = "";
-  for (byte i = 0; i < rfid.uid.size; i++) {
-    cardUID += String(rfid.uid.uidByte[i], HEX);
-  }
-  cardUID.toUpperCase();
-
-  Serial.print("RFID tap detected: ");
-  Serial.println(cardUID);
-
-  // Halt PICC
-  rfid.PICC_HaltA();
-  rfid.PCD_StopCrypto1();
-
-  // Check rate limit
-  if (isRateLimited(cardUID)) {
-    Serial.println("Rate limited - tap ignored");
-
-    String payload = "{\"card_uid\":\"" + cardUID +
-                     "\",\"device_id\":\"" + DEVICE_ID +
-                     "\",\"fill_pct_before\":" + String(currentFillPct, 1) +
-                     ",\"fill_pct_after\":" + String(currentFillPct, 1) +
-                     ",\"points_awarded\":0" +
-                     ",\"confidence\":\"rate_limited\"" +
-                     ",\"timestamp\":\"" + getTimestamp() + "\"}";
-
-    if (!postToSupabase("reward_events", payload)) {
-      bufferEvent("reward_events", payload);
-    }
-
-    return;
-  }
-
-  // Start reward session
-  startRewardSession(cardUID);
+void registerDevice() {
+  String payload = "{\"device_id\":\"" + DEVICE_ID + "\",\"location\":\"Not Set\"}";
+  if (postToSupabase("devices", payload, true)) Serial.println("Device registered/upserted successfully.");
+  else Serial.println("Device registration/upsert failed - continuing.");
 }
-
-// ============================================================================
-// SETUP
-// ============================================================================
 
 void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("\n\n=== Smart Bin ESP32 Starting ===");
+  Serial.begin(115200); delay(1000);
+  Serial.println("\n================================\nSMART BIN ESP32 STARTING\n================================");
 
-  // Load calibration from flash
-  preferences.begin("smartbin", true);
-  calibratedBaseline = preferences.getFloat("baseline", DEFAULT_BIN_HEIGHT);
-  preferences.end();
-
-  if (calibratedBaseline > 5.0 && calibratedBaseline < 400.0) {
-    calibrationValid = true;
-    Serial.print("Loaded calibration: ");
-    Serial.print(calibratedBaseline);
-    Serial.println(" cm");
-  } else {
-    calibratedBaseline = DEFAULT_BIN_HEIGHT;
-    Serial.println("No valid calibration - using default");
-  }
-
-  // Pin setup
-  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ONBOARD_LED_PIN, OUTPUT); led(false);
+  pinMode(TRIG_PIN, OUTPUT); digitalWrite(TRIG_PIN, LOW);
   pinMode(ECHO_PIN, INPUT);
-  pinMode(CALIBRATION_BUTTON_PIN, INPUT_PULLUP);
   pinMode(VIBRATION_PIN, INPUT);
+  pinMode(CALIBRATION_BUTTON_PIN, INPUT_PULLUP);
+  lastButtonState = digitalRead(CALIBRATION_BUTTON_PIN);
+  lastButtonChange = millis();
 
-  // Vibration interrupt
+  loadCalibration();
+
+  noInterrupts();
+  vibrationPulseCount = 0;
+  lastVibrationTime = 0;
+  vibrationPulsePending = false;
+  interrupts();
+  processedPulseCount = 0;
+
+  SPI.begin(); rfid.PCD_Init(); Serial.println("RC522 initialized.");
   attachInterrupt(digitalPinToInterrupt(VIBRATION_PIN), vibrationISR, RISING);
 
-  // Initialize SPI and RC522
-  SPI.begin();
-  rfid.PCD_Init();
-  Serial.println("RC522 initialized");
-
-  // WiFi connect
   connectWiFi();
+  if (WiFi.status() == WL_CONNECTED) registerDevice();
 
-  // Register device (upsert)
-  if (WiFi.status() == WL_CONNECTED) {
-    String payload = "{\"device_id\":\"" + DEVICE_ID +
-                     "\",\"location\":\"Not Set\"}";
-    postToSupabase("devices", payload);
-  }
-
-  Serial.println("=== Setup Complete ===\n");
-
-  // Take initial reading
-  takeBinReading();
+  Serial.println("Setup complete.");
+  if (calibrationValid) takeBinReading();
+  else Serial.println("Waiting for calibration before reporting fill percentage.");
   lastReadingTime = millis();
+  Serial.println("\nSMART BIN READY.");
+  Serial.println("Press calibration button once with the bin EMPTY.");
 }
-
-// ============================================================================
-// MAIN LOOP
-// ============================================================================
 
 void loop() {
   unsigned long now = millis();
-
-  // WiFi reconnect check
   if (WiFi.status() != WL_CONNECTED) {
     static unsigned long lastReconnect = 0;
-    if (now - lastReconnect > 30000) {  // Try every 30s
-      Serial.println("WiFi disconnected - reconnecting...");
-      connectWiFi();
-      lastReconnect = now;
-
-      if (WiFi.status() == WL_CONNECTED) {
-        flushEventBuffer();
-      }
+    if (now - lastReconnect >= 30000) {
+      lastReconnect = now; Serial.println("WiFi disconnected - reconnecting..."); connectWiFi();
+      if (WiFi.status() == WL_CONNECTED) { registerDevice(); flushEventBuffer(); }
     }
-  } else {
-    // Flush any buffered events
-    if (eventBufferSize > 0) {
-      flushEventBuffer();
-    }
-  }
+  } else if (eventBufferSize > 0) flushEventBuffer();
 
-  // Calibration button check
-  if (digitalRead(CALIBRATION_BUTTON_PIN) == LOW) {
-    if (now - lastButtonPress > BUTTON_DEBOUNCE_MS) {
-      lastButtonPress = now;
-      performCalibration();
-    }
-  }
-
-  // Periodic bin reading
-  if (now - lastReadingTime > READING_INTERVAL) {
-    takeBinReading();
-    lastReadingTime = now;
-  }
-
-  // Empty detection (vibration + fill drop)
-  checkEmptyDetection();
-
-  // RFID tap detection
-  checkRFIDTap();
-
-  // Check disposal window if reward session active
-  if (rewardSession.active) {
-    checkDisposalInWindow();
-  }
-
-  delay(10);  // Small delay to prevent tight loop
+  checkCalibrationButton();
+  if (calibrationValid && now - lastReadingTime >= READING_INTERVAL) { takeBinReading(); lastReadingTime = millis(); }
+  updateMotion();
+  checkRFID();
+  checkReward();
+  delay(10);
 }
