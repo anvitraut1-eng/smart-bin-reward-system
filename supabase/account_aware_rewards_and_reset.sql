@@ -1,5 +1,70 @@
--- Run this once in the Supabase SQL Editor.
--- Adds secure account-aware reward processing and an admin-only project reset.
+-- Run after schema.sql.
+-- Makes reward processing, pending-card expiry, permissions and admin reset
+-- consistent with the current ESP32/PWA flow.
+
+-- schema.sql has an older AFTER INSERT card-registration trigger. Replace it
+-- with a BEFORE trigger so known cards are confirmed before the points trigger.
+CREATE OR REPLACE FUNCTION public.check_card_registration_atomic()
+RETURNS trigger AS $$
+DECLARE
+  card_exists BOOLEAN;
+  pending_exists BOOLEAN;
+BEGIN
+  IF NEW.confidence NOT IN ('confirmed', 'no_disposal', 'rate_limited', 'pending_link') THEN
+    NEW.confidence := 'pending_link';
+    NEW.points_awarded := 0;
+  END IF;
+
+  IF NEW.confidence = 'pending_link' THEN
+    SELECT EXISTS (
+      SELECT 1 FROM public.citizens WHERE card_uid = NEW.card_uid AND user_id IS NOT NULL
+    ) INTO card_exists;
+
+    IF card_exists THEN
+      NEW.confidence := 'confirmed';
+      NEW.points_awarded := 10;
+    ELSE
+      NEW.points_awarded := 0;
+      SELECT EXISTS (
+        SELECT 1 FROM public.pending_card_links
+        WHERE card_uid = NEW.card_uid AND claimed = false AND expires_at > NOW()
+      ) INTO pending_exists;
+
+      IF NOT pending_exists THEN
+        INSERT INTO public.pending_card_links (card_uid, device_id, timestamp)
+        VALUES (NEW.card_uid, NEW.device_id, NEW.timestamp);
+      END IF;
+    END IF;
+  ELSIF NEW.confidence IN ('no_disposal', 'rate_limited') THEN
+    NEW.points_awarded := 0;
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+
+DROP TRIGGER IF EXISTS trigger_check_card_registration ON public.reward_events;
+DROP TRIGGER IF EXISTS trigger_check_card_registration_atomic ON public.reward_events;
+CREATE TRIGGER trigger_check_card_registration_atomic
+  BEFORE INSERT ON public.reward_events
+  FOR EACH ROW EXECUTE FUNCTION public.check_card_registration_atomic();
+
+-- Pending links are shown in the PWA for up to 24 hours, matching the UI.
+CREATE OR REPLACE FUNCTION public.ensure_pending_card_expires_soon()
+RETURNS trigger AS $$
+BEGIN
+  IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND NEW.expires_at IS DISTINCT FROM OLD.expires_at) THEN
+    NEW.expires_at := LEAST(NOW() + INTERVAL '24 hours', NEW.expires_at);
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
+
+-- The firmware uses preconfigured devices; anonymous clients do not need to
+-- create or modify device rows.
+DROP POLICY IF EXISTS devices_anon_insert ON public.devices;
+DROP POLICY IF EXISTS devices_anon_update ON public.devices;
+REVOKE INSERT, UPDATE ON public.devices FROM anon;
 
 CREATE OR REPLACE FUNCTION public.record_reward(
   p_card_uid TEXT,
@@ -26,8 +91,6 @@ BEGIN
     RETURN QUERY SELECT FALSE, NULL::TEXT, 0, FALSE, 'Disposal threshold not met'; RETURN;
   END IF;
 
-  -- Let the database trigger decide whether the event is confirmed or pending.
-  -- This keeps the RPC response identical to the row that was actually stored.
   INSERT INTO public.reward_events
     (card_uid, device_id, fill_pct_before, fill_pct_after, weight_estimate_kg, points_awarded, confidence, timestamp)
   VALUES
@@ -42,6 +105,10 @@ $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
 REVOKE ALL ON FUNCTION public.record_reward(TEXT, TEXT, NUMERIC, NUMERIC, INTEGER) FROM PUBLIC, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_reward(TEXT, TEXT, NUMERIC, NUMERIC, INTEGER) TO anon;
 REVOKE INSERT ON public.reward_events FROM anon;
+
+-- Remove stale overloads left by earlier versions. The PWA uses the 2-arg RPC.
+DROP FUNCTION IF EXISTS public.claim_pending_card(BIGINT);
+DROP FUNCTION IF EXISTS public.claim_pending_card(UUID, TEXT, TEXT);
 
 CREATE OR REPLACE FUNCTION public.reset_project_data()
 RETURNS TABLE(success BOOLEAN, error_message TEXT)
