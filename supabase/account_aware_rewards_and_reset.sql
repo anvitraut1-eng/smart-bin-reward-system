@@ -65,13 +65,14 @@ BEGIN
   END IF;
 
   -- Keep auth.users and profiles (the actual user accounts).
-  DELETE FROM public.redemptions;
-  DELETE FROM public.reward_events;
-  DELETE FROM public.pending_card_links;
-  DELETE FROM public.empty_events;
-  DELETE FROM public.bin_readings;
-  DELETE FROM public.citizens;
-  DELETE FROM public.devices;
+  -- Explicit WHERE clauses are required by Supabase's safe-delete setting.
+  DELETE FROM public.redemptions WHERE TRUE;
+  DELETE FROM public.reward_events WHERE TRUE;
+  DELETE FROM public.pending_card_links WHERE TRUE;
+  DELETE FROM public.empty_events WHERE TRUE;
+  DELETE FROM public.bin_readings WHERE TRUE;
+  DELETE FROM public.citizens WHERE TRUE;
+  DELETE FROM public.devices WHERE TRUE;
 
   -- Keep the two configured school-project bins so ESP32 FK inserts continue
   -- working immediately after a reset.
