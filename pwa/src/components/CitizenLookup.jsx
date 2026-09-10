@@ -15,7 +15,6 @@ function CitizenLookup({ onBack }) {
     setNotFound(false);
 
     try {
-      // Get citizen info
       const { data: citizenData, error: citizenError } = await supabase
         .from('citizens')
         .select('*')
@@ -29,7 +28,6 @@ function CitizenLookup({ onBack }) {
       } else {
         setCitizen(citizenData);
 
-        // Get reward history
         const { data: rewards } = await supabase
           .from('reward_events')
           .select('*')
@@ -47,48 +45,50 @@ function CitizenLookup({ onBack }) {
     }
   };
 
-  useEffect(() => {
-    if (citizen) {
-      // Subscribe to realtime point updates
-      const channel = supabase
-        .channel(`citizen-${citizen.card_uid}`)
-        .on(
-          'postgres_changes',
-          {
-            event: 'UPDATE',
-            schema: 'public',
-            table: 'citizens',
-            filter: `card_uid=eq.${citizen.card_uid}`
-          },
-          (payload) => {
-            setCitizen(payload.new);
-          }
-        )
-        .on(
-          'postgres_changes',
-          {
-            event: 'INSERT',
-            schema: 'public',
-            table: 'reward_events',
-            filter: `card_uid=eq.${citizen.card_uid}`
-          },
-          () => {
-            lookupCitizen(citizen.card_uid);
-          }
-        )
-        .subscribe();
+  const cardUid = citizen?.card_uid;
 
-      return () => {
-        supabase.removeChannel(channel);
-      };
-    }
-  }, [citizen]);
+  useEffect(() => {
+    if (!cardUid) return;
+
+    const channel = supabase
+      .channel(`citizen-${cardUid}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'citizens',
+          filter: `card_uid=eq.${cardUid}`
+        },
+        (payload) => {
+          setCitizen(payload.new);
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'reward_events',
+          filter: `card_uid=eq.${cardUid}`
+        },
+        () => {
+          lookupCitizen(cardUid);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [cardUid]);
 
   const getConfidenceBadge = (confidence) => {
     const colors = {
       confirmed: '#44ff44',
       no_disposal: '#ffaa00',
-      rate_limited: '#ff4444'
+      rate_limited: '#ff4444',
+      pending_link: '#ffaa00'
     };
     return (
       <span
@@ -117,7 +117,7 @@ function CitizenLookup({ onBack }) {
           placeholder="Enter Card UID (e.g., ABCD1234)"
           value={cardUID}
           onChange={(e) => setCardUID(e.target.value.toUpperCase())}
-          onKeyPress={(e) => e.key === 'Enter' && lookupCitizen(cardUID)}
+          onKeyDown={(e) => e.key === 'Enter' && lookupCitizen(cardUID)}
         />
         <button onClick={() => lookupCitizen(cardUID)} disabled={loading}>
           {loading ? 'Looking up...' : 'Lookup'}
