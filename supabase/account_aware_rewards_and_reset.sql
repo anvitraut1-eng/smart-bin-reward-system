@@ -11,7 +11,6 @@ CREATE OR REPLACE FUNCTION public.record_reward(
 RETURNS TABLE(success BOOLEAN, confidence TEXT, points_awarded INTEGER, card_linked BOOLEAN, error_message TEXT)
 AS $$
 DECLARE
-  v_user_id UUID;
   v_confidence TEXT;
   v_points INTEGER;
 BEGIN
@@ -27,33 +26,21 @@ BEGIN
     RETURN QUERY SELECT FALSE, NULL::TEXT, 0, FALSE, 'Disposal threshold not met'; RETURN;
   END IF;
 
-  SELECT c.user_id INTO v_user_id
-  FROM public.citizens c
-  WHERE c.card_uid = p_card_uid
-  LIMIT 1;
-
-  IF v_user_id IS NOT NULL THEN
-    v_confidence := 'confirmed';
-    v_points := LEAST(GREATEST(COALESCE(p_points, 10), 0), 10);
-  ELSE
-    v_confidence := 'pending_link';
-    v_points := 0;
-  END IF;
-
+  -- Let the database trigger decide whether the event is confirmed or pending.
+  -- This keeps the RPC response identical to the row that was actually stored.
   INSERT INTO public.reward_events
     (card_uid, device_id, fill_pct_before, fill_pct_after, weight_estimate_kg, points_awarded, confidence, timestamp)
   VALUES
-    (p_card_uid, p_device_id, p_fill_before, p_fill_after, 0, v_points, v_confidence, NOW());
+    (p_card_uid, p_device_id, p_fill_before, p_fill_after, 0, 0, 'pending_link', NOW())
+  RETURNING public.reward_events.confidence, public.reward_events.points_awarded
+  INTO v_confidence, v_points;
 
-  RETURN QUERY SELECT TRUE, v_confidence, v_points, (v_user_id IS NOT NULL), NULL::TEXT;
+  RETURN QUERY SELECT TRUE, v_confidence, v_points, (v_confidence = 'confirmed'), NULL::TEXT;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp;
 
 REVOKE ALL ON FUNCTION public.record_reward(TEXT, TEXT, NUMERIC, NUMERIC, INTEGER) FROM PUBLIC, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_reward(TEXT, TEXT, NUMERIC, NUMERIC, INTEGER) TO anon;
-
--- Firmware uses record_reward(), so anonymous clients no longer need direct
--- reward-event INSERT access.
 REVOKE INSERT ON public.reward_events FROM anon;
 
 CREATE OR REPLACE FUNCTION public.reset_project_data()
@@ -64,8 +51,6 @@ BEGIN
     RETURN QUERY SELECT FALSE, 'Not authorized'; RETURN;
   END IF;
 
-  -- Keep auth.users and profiles (the actual user accounts).
-  -- Explicit WHERE clauses are required by Supabase's safe-delete setting.
   DELETE FROM public.redemptions WHERE TRUE;
   DELETE FROM public.reward_events WHERE TRUE;
   DELETE FROM public.pending_card_links WHERE TRUE;
@@ -74,15 +59,11 @@ BEGIN
   DELETE FROM public.citizens WHERE TRUE;
   DELETE FROM public.devices WHERE TRUE;
 
-  -- Keep the two configured school-project bins so ESP32 FK inserts continue
-  -- working immediately after a reset.
   INSERT INTO public.devices (device_id, location) VALUES
     ('BIN_ESP32_001', 'Not Set'),
     ('BIN_ESP32_002', 'Not Set')
   ON CONFLICT (device_id) DO UPDATE SET location = EXCLUDED.location;
 
-  -- Keep the accounts, but clear their RFID associations so cards can be
-  -- freshly claimed during the next test run.
   UPDATE public.profiles SET card_uid = NULL WHERE card_uid IS NOT NULL;
 
   RETURN QUERY SELECT TRUE, NULL::TEXT;
