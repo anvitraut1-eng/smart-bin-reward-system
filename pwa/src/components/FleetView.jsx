@@ -10,7 +10,6 @@ function FleetView({ onSelectBin }) {
   useEffect(() => {
     fetchBins();
 
-    // Subscribe to realtime updates
     const channel = supabase
       .channel('fleet-updates')
       .on(
@@ -32,7 +31,6 @@ function FleetView({ onSelectBin }) {
 
   const fetchBins = async () => {
     try {
-      // Get all devices
       const { data: devices, error: devicesError } = await supabase
         .from('devices')
         .select('*')
@@ -40,32 +38,33 @@ function FleetView({ onSelectBin }) {
 
       if (devicesError) throw devicesError;
 
-      // Get latest reading for each device
       const binsWithStatus = await Promise.all(
         devices.map(async (device) => {
-          const { data: readings } = await supabase
+          const { data: readings, error: readingsError } = await supabase
             .from('bin_readings')
             .select('fill_pct, timestamp')
             .eq('device_id', device.device_id)
             .order('timestamp', { ascending: false })
             .limit(1);
 
+          if (readingsError) throw readingsError;
+
           const latestReading = readings?.[0];
           const isOffline = latestReading
-            ? Date.now() - new Date(latestReading.timestamp).getTime() > 300000 // 5 min
+            ? Date.now() - new Date(latestReading.timestamp).getTime() > 300000
             : true;
+          const fillPct = latestReading ? Number(latestReading.fill_pct) : null;
 
           return {
             ...device,
-            fill_pct: latestReading?.fill_pct || 0,
+            fill_pct: fillPct,
             last_seen: latestReading?.timestamp,
-            status: isOffline ? 'offline' : latestReading.fill_pct > 80 ? 'needs_pickup' : 'ok'
+            status: isOffline ? 'offline' : fillPct > 80 ? 'needs_pickup' : 'ok'
           };
         })
       );
 
-      // Sort by fill % descending
-      binsWithStatus.sort((a, b) => b.fill_pct - a.fill_pct);
+      binsWithStatus.sort((a, b) => (b.fill_pct ?? -1) - (a.fill_pct ?? -1));
       setBins(binsWithStatus);
     } catch (error) {
       console.error('Error fetching bins:', error);
@@ -94,25 +93,24 @@ function FleetView({ onSelectBin }) {
 
   const getStatusColor = (status) => {
     switch (status) {
-      case 'needs_pickup':
-        return '#ff4444';
-      case 'offline':
-        return '#888888';
-      default:
-        return '#44ff44';
+      case 'needs_pickup': return '#ff4444';
+      case 'offline': return '#888888';
+      default: return '#44ff44';
     }
   };
 
   const getStatusLabel = (status) => {
     switch (status) {
-      case 'needs_pickup':
-        return 'Needs Pickup';
-      case 'offline':
-        return 'Offline';
-      default:
-        return 'OK';
+      case 'needs_pickup': return 'Needs Pickup';
+      case 'offline': return 'Offline';
+      default: return 'OK';
     }
   };
+
+  const onlineBins = bins.filter((bin) => bin.status !== 'offline' && bin.fill_pct != null);
+  const averageFill = onlineBins.length > 0
+    ? Math.round(onlineBins.reduce((sum, bin) => sum + bin.fill_pct, 0) / onlineBins.length)
+    : null;
 
   if (loading) {
     return <div className="loading">Loading fleet data...</div>;
@@ -140,82 +138,88 @@ function FleetView({ onSelectBin }) {
         <div className="summary-card">
           <h3>Average Fill</h3>
           <p className="big-number">
-            {bins.length > 0
-              ? Math.round(bins.reduce((sum, b) => sum + b.fill_pct, 0) / bins.length)
-              : 0}
-            %
+            {averageFill == null ? '—' : `${averageFill}%`}
           </p>
         </div>
       </div>
 
       <div className="bins-grid">
-        {bins.map((bin) => (
-          <div key={bin.device_id} className="bin-card">
-            <div className="bin-header">
-              <div className="bin-id" onClick={() => onSelectBin(bin.device_id)}>
-                {bin.device_id}
-              </div>
-              <div
-                className="status-badge"
-                style={{ backgroundColor: getStatusColor(bin.status) }}
-              >
-                {getStatusLabel(bin.status)}
-              </div>
-            </div>
-
-            <div className="bin-location">
-              {editingBin === bin.device_id ? (
-                <div className="location-edit">
-                  <input
-                    type="text"
-                    value={newLocation}
-                    onChange={(e) => setNewLocation(e.target.value)}
-                    placeholder="Enter location"
-                    autoFocus
-                  />
-                  <button onClick={() => updateLocation(bin.device_id)}>Save</button>
-                  <button onClick={() => setEditingBin(null)}>Cancel</button>
+        {bins.map((bin) => {
+          const hasReading = bin.fill_pct != null;
+          return (
+            <div key={bin.device_id} className="bin-card">
+              <div className="bin-header">
+                <div className="bin-id" onClick={() => onSelectBin(bin.device_id)}>
+                  {bin.device_id}
                 </div>
-              ) : (
-                <div className="location-display">
-                  <span>📍 {bin.location}</span>
-                  <button
-                    onClick={() => {
-                      setEditingBin(bin.device_id);
-                      setNewLocation(bin.location);
+                <div
+                  className="status-badge"
+                  style={{ backgroundColor: getStatusColor(bin.status) }}
+                >
+                  {getStatusLabel(bin.status)}
+                </div>
+              </div>
+
+              <div className="bin-location">
+                {editingBin === bin.device_id ? (
+                  <div className="location-edit">
+                    <input
+                      type="text"
+                      value={newLocation}
+                      onChange={(e) => setNewLocation(e.target.value)}
+                      placeholder="Enter location"
+                      autoFocus
+                    />
+                    <button onClick={() => updateLocation(bin.device_id)}>Save</button>
+                    <button onClick={() => setEditingBin(null)}>Cancel</button>
+                  </div>
+                ) : (
+                  <div className="location-display">
+                    <span>📍 {bin.location}</span>
+                    <button
+                      onClick={() => {
+                        setEditingBin(bin.device_id);
+                        setNewLocation(bin.location);
+                      }}
+                    >
+                      Edit
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              <div className="fill-gauge">
+                <div className="gauge-bar">
+                  <div
+                    className="gauge-fill"
+                    style={{
+                      width: `${hasReading ? bin.fill_pct : 0}%`,
+                      backgroundColor:
+                        hasReading && bin.fill_pct > 80
+                          ? '#ff4444'
+                          : hasReading && bin.fill_pct > 50
+                            ? '#ffaa00'
+                            : '#44ff44'
                     }}
-                  >
-                    Edit
-                  </button>
+                  />
+                </div>
+                <div className="gauge-label">
+                  {hasReading ? `${Math.round(bin.fill_pct)}% full` : 'No reading'}
+                </div>
+              </div>
+
+              {bin.last_seen && (
+                <div className="last-seen">
+                  Last update: {new Date(bin.last_seen).toLocaleString()}
                 </div>
               )}
+
+              <button className="view-details-btn" onClick={() => onSelectBin(bin.device_id)}>
+                View Details
+              </button>
             </div>
-
-            <div className="fill-gauge">
-              <div className="gauge-bar">
-                <div
-                  className="gauge-fill"
-                  style={{
-                    width: `${bin.fill_pct}%`,
-                    backgroundColor:
-                      bin.fill_pct > 80 ? '#ff4444' : bin.fill_pct > 50 ? '#ffaa00' : '#44ff44'
-                  }}
-                />
-              </div>
-              <div className="gauge-label">{Math.round(bin.fill_pct)}% full</div>
-            </div>
-
-            {bin.last_seen && (
-              <div className="last-seen">
-                Last update: {new Date(bin.last_seen).toLocaleString()}
-              </div>
-            )}
-
-            <button className="view-details-btn" onClick={() => onSelectBin(bin.device_id)}>
-              View Details
-            </button>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {bins.length === 0 && (
